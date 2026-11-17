@@ -356,7 +356,7 @@ class ResponseApiRequestMessageTest {
     }
 
     @Test
-    fun `unencrypted reasoning should replay plaintext content`() {
+    fun `unencrypted reasoning should not include non-empty content array`() {
         val reasoningItem = invokeBuildMessages(listOf(
             UIMessage(
                 role = MessageRole.ASSISTANT,
@@ -368,12 +368,9 @@ class ResponseApiRequestMessageTest {
             ),
         )).single().jsonObject
 
-        val content = reasoningItem["content"]?.jsonArray
-        assertEquals(1, content?.size)
-        assertEquals(
-            "plaintext reasoning",
-            content?.single()?.jsonObject?.get("text")?.jsonPrimitive?.content,
-        )
+        assertEquals("reasoning", reasoningItem["type"]?.jsonPrimitive?.content)
+        assertEquals("rs_1", reasoningItem["id"]?.jsonPrimitive?.content)
+        assertFalse(reasoningItem.containsKey("content"))
         assertFalse(reasoningItem.containsKey("encrypted_content"))
     }
 
