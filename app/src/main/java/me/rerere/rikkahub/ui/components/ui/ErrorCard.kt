@@ -120,6 +120,17 @@ fun ErrorCard(
     val checkFastModelSettings = stringResource(R.string.chat_page_check_fast_model_settings)
     val linkColor = MaterialTheme.colorScheme.primary
     val rawMessage = error.error.message ?: "Unknown error"
+    val displayMessage = if (rawMessage.contains("bad_response_status_code", ignoreCase = true) &&
+        rawMessage.contains("openai_error", ignoreCase = true)
+    ) {
+        "$rawMessage\n(Upstream relay error: the provider's upstream channel returned an error status for this model or endpoint)"
+    } else {
+        rawMessage
+    }
+    val providerModelLabel = listOfNotNull(
+        error.providerName?.takeIf { it.isNotBlank() },
+        error.modelName?.takeIf { it.isNotBlank() },
+    ).joinToString(" / ").takeIf { it.isNotBlank() }
     val isContextOrCompressionError = rawMessage.contains("ContextWindowExceeded", ignoreCase = true) ||
         rawMessage.contains("context length", ignoreCase = true) ||
         rawMessage.contains("longer than the model", ignoreCase = true) ||
@@ -157,7 +168,15 @@ fun ErrorCard(
                 ) {
                     if (error.title != null) {
                         Text(
-                            text = error.title,
+                            text = if (providerModelLabel != null) "${error.title} ($providerModelLabel)" else error.title,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    } else if (providerModelLabel != null) {
+                        Text(
+                            text = providerModelLabel,
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onErrorContainer,
                             maxLines = 1,
@@ -165,7 +184,7 @@ fun ErrorCard(
                         )
                     }
                     Text(
-                        text = rawMessage,
+                        text = displayMessage,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
                         maxLines = 4,

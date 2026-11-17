@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -448,24 +449,24 @@ private fun ChatListNormal(
                         }
 
                         if (streamHeartbeat?.isStuck == true) {
-                            Row(
+                            FlowRow(
                                 modifier = Modifier.padding(start = 36.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
                                 AssistChip(
                                     onClick = onExtendWatchdog,
-                                    label = { Text("Wait 30s") },
+                                    label = { Text("Wait 30s", maxLines = 1, softWrap = false) },
                                 )
                                 if (streamHeartbeat.canSwitchModel) {
                                     AssistChip(
                                         onClick = onSwitchModel,
-                                        label = { Text("Switch Model") },
+                                        label = { Text("Switch Model", maxLines = 1, softWrap = false) },
                                     )
                                 }
                                 AssistChip(
                                     onClick = onCancelGeneration,
-                                    label = { Text("Cancel") },
+                                    label = { Text("Cancel", maxLines = 1, softWrap = false) },
                                 )
                             }
                         }

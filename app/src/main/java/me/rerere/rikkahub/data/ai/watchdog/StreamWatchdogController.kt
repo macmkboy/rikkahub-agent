@@ -29,15 +29,30 @@ class StreamWatchdogController(
     val candidateModelName: String? = null,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
-    private val startTimeMs = clock()
-    private val lastChunkTimeMs = AtomicLong(startTimeMs)
+    private val startTimeMs = AtomicLong(clock())
+    private val lastChunkTimeMs = AtomicLong(startTimeMs.get())
     private val extensionMs = AtomicLong(0L)
+    private val stuckGraceUntilMs = AtomicLong(0L)
     private val switchRequested = AtomicBoolean(false)
 
     private val _heartbeatState = MutableStateFlow<StreamHeartbeatState?>(null)
     val heartbeatState: StateFlow<StreamHeartbeatState?> = _heartbeatState.asStateFlow()
 
     private var tickerJob: Job? = null
+
+    /**
+     * Resets timers and flags for a fresh retry attempt so stale idle time
+     * or a prior switch request does not immediately abort the new attempt.
+     */
+    fun resetForAttempt() {
+        val now = clock()
+        startTimeMs.set(now)
+        lastChunkTimeMs.set(now)
+        extensionMs.set(0L)
+        stuckGraceUntilMs.set(0L)
+        switchRequested.set(false)
+        tick(now)
+    }
 
     /**
      * Start the 1-second heartbeat ticker coroutine.
@@ -60,12 +75,21 @@ class StreamWatchdogController(
 
     fun onChunkReceived() {
         lastChunkTimeMs.set(clock())
+        stuckGraceUntilMs.set(0L)
         tick()
     }
 
     fun extendDeadline(seconds: Long = 30L) {
-        extensionMs.addAndGet(seconds * 1000L)
-        tick()
+        val now = clock()
+        val addMs = seconds * 1000L
+        val currentIdleMs = now - lastChunkTimeMs.get()
+        val currentEffective = idleTimeoutMs + extensionMs.get()
+        // Guarantee at least `seconds` from `now` even if we were already close to or past timeout.
+        val neededExtension = (currentIdleMs + addMs) - idleTimeoutMs
+        val targetExtension = maxOf(currentEffective - idleTimeoutMs + addMs, neededExtension)
+        extensionMs.set(targetExtension.coerceAtLeast(addMs))
+        stuckGraceUntilMs.set(now + addMs)
+        tick(now)
     }
 
     fun requestModelSwitch() {
@@ -86,47 +110,38 @@ class StreamWatchdogController(
             return WatchdogDecision.TimeoutExpired
         }
 
-        val isStuck = idleMs >= stuckThresholdMs
-        val elapsedSec = (nowMs - startTimeMs).coerceAtLeast(0L) / 1000L
-        val idleSec = idleMs.coerceAtLeast(0L) / 1000L
-
-        val state = StreamHeartbeatState(
-            elapsedSeconds = elapsedSec,
-            idleSeconds = idleSec,
-            isStuck = isStuck,
-            canSwitchModel = canSwitchModel,
-            candidateModelName = candidateModelName,
-            statusText = if (isStuck) {
-                "Streaming stalled (${elapsedSec}s elapsed, idle ${idleSec}s)"
-            } else {
-                "Streaming (${elapsedSec}s elapsed)"
-            }
-        )
-
-        return if (isStuck) WatchdogDecision.Stuck(state) else WatchdogDecision.Active
+        val state = buildState(nowMs, lastChunk, idleMs)
+        return if (state.isStuck) WatchdogDecision.Stuck(state) else WatchdogDecision.Active
     }
 
     fun tick(nowMs: Long = clock()): StreamHeartbeatState {
         val lastChunk = lastChunkTimeMs.get()
         val idleMs = nowMs - lastChunk
-        val isStuck = idleMs >= stuckThresholdMs
-        val elapsedSec = (nowMs - startTimeMs).coerceAtLeast(0L) / 1000L
-        val idleSec = idleMs.coerceAtLeast(0L) / 1000L
+        val state = buildState(nowMs, lastChunk, idleMs)
+        _heartbeatState.value = state
+        return state
+    }
 
-        val state = StreamHeartbeatState(
+    private fun buildState(nowMs: Long, lastChunk: Long, idleMs: Long): StreamHeartbeatState {
+        val inGrace = nowMs < stuckGraceUntilMs.get()
+        val isStuck = !inGrace && idleMs >= stuckThresholdMs
+        val elapsedSec = (nowMs - startTimeMs.get()).coerceAtLeast(0L) / 1000L
+        val idleSec = idleMs.coerceAtLeast(0L) / 1000L
+        val statusText = when {
+            isStuck -> "Streaming stalled (${elapsedSec}s elapsed, idle ${idleSec}s)"
+            inGrace -> {
+                val graceRem = ((stuckGraceUntilMs.get() - nowMs) / 1000L).coerceAtLeast(1L)
+                "Waiting +${graceRem}s (${elapsedSec}s elapsed)"
+            }
+            else -> "Streaming (${elapsedSec}s elapsed)"
+        }
+        return StreamHeartbeatState(
             elapsedSeconds = elapsedSec,
             idleSeconds = idleSec,
             isStuck = isStuck,
             canSwitchModel = canSwitchModel,
             candidateModelName = candidateModelName,
-            statusText = if (isStuck) {
-                "Streaming stalled (${elapsedSec}s elapsed, idle ${idleSec}s)"
-            } else {
-                "Streaming (${elapsedSec}s elapsed)"
-            }
+            statusText = statusText,
         )
-
-        _heartbeatState.value = state
-        return state
     }
 }

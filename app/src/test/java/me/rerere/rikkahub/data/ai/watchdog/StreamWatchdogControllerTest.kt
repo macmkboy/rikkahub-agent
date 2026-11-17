@@ -74,10 +74,11 @@ class StreamWatchdogControllerTest {
         val expiredDecision = controller.evaluate(currentTime)
         assertEquals(WatchdogDecision.TimeoutExpired, expiredDecision)
 
-        // With 30s extension (deadline = 105s), 76s is not expired
+        // With 30s extension at 76s, deadline moves to 106s and stuck grace clears stalled state
         controller.extendDeadline(30L)
         val extendedDecision = controller.evaluate(currentTime)
-        assertTrue(extendedDecision is WatchdogDecision.Stuck)
+        assertEquals(WatchdogDecision.Active, extendedDecision)
+        assertFalse(controller.heartbeatState.value!!.isStuck)
 
         // Past extended deadline (106s), timeout expires
         currentTime = 106_000L
@@ -85,7 +86,7 @@ class StreamWatchdogControllerTest {
     }
 
     @Test
-    fun `requestModelSwitch triggers immediate switch decision`() {
+    fun `requestModelSwitch triggers immediate switch decision and resetForAttempt clears it`() {
         var currentTime = 10_000L
         val controller = StreamWatchdogController(
             canSwitchModel = true,
@@ -96,5 +97,9 @@ class StreamWatchdogControllerTest {
         controller.requestModelSwitch()
         val decision = controller.evaluate(currentTime)
         assertEquals(WatchdogDecision.SwitchModelRequested, decision)
+
+        currentTime = 90_000L
+        controller.resetForAttempt()
+        assertEquals(WatchdogDecision.Active, controller.evaluate(currentTime))
     }
 }

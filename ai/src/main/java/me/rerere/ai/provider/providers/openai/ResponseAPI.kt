@@ -415,34 +415,27 @@ class ResponseAPI(
                                         it.metadataAs<OpenAIReasoningMetadata>()?.reasoningId == reasoningId
                                     }
                                 }
+                                val encryptedContent = reasoningMetadata?.encryptedContent
+                                val summaryParts = reasoningParts
+                                    .filter { it.reasoningType == ReasoningType.SUMMARY_TEXT }
+                                    .filter { it.reasoning.isNotEmpty() }
+                                // OpenAI Responses API forbids non-empty `content` arrays on `reasoning` input items
+                                // (`Invalid 'input[i].content': array too long. Expected an array with maximum length 0`).
+                                // Skip emitting a reasoning item altogether if there is no id/encrypted_content/summary to send.
+                                if (reasoningId == null && encryptedContent == null && summaryParts.isEmpty()) {
+                                    return@forEach
+                                }
                                 add(buildJsonObject {
                                     put("type", "reasoning")
                                     reasoningId?.let { put("id", it) }
                                     put("summary", buildJsonArray {
-                                        reasoningParts
-                                            .filter { it.reasoningType == ReasoningType.SUMMARY_TEXT }
-                                            .filter { it.reasoning.isNotEmpty() }
-                                            .forEach {
-                                                add(buildJsonObject {
-                                                    put("type", "summary_text")
-                                                    put("text", it.reasoning)
-                                                })
-                                            }
+                                        summaryParts.forEach {
+                                            add(buildJsonObject {
+                                                put("type", "summary_text")
+                                                put("text", it.reasoning)
+                                            })
+                                        }
                                     })
-                                    val encryptedContent = reasoningMetadata?.encryptedContent
-                                    val content = reasoningParts
-                                        .filter { it.reasoningType == ReasoningType.REASONING_TEXT }
-                                        .filter { it.reasoning.isNotEmpty() }
-                                    if (encryptedContent == null && content.isNotEmpty()) {
-                                        put("content", buildJsonArray {
-                                            content.forEach {
-                                                add(buildJsonObject {
-                                                    put("type", "reasoning_text")
-                                                    put("text", it.reasoning)
-                                                })
-                                            }
-                                        })
-                                    }
                                     encryptedContent?.let {
                                         put("encrypted_content", it)
                                     }

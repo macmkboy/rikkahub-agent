@@ -96,6 +96,15 @@ internal const val STREAM_IDLE_WATCHDOG_TIMEOUT_MS = 75_000L
 
 internal class StreamIdleTimeoutException(message: String) : IOException(message)
 
+internal class UserRequestedModelSwitchException(message: String) : IOException(message)
+
+class ProviderGenerationException(
+    val providerName: String,
+    val modelId: String,
+    val modelDisplayName: String,
+    cause: Throwable,
+) : RuntimeException(cause.message ?: cause.javaClass.simpleName, cause)
+
 @OptIn(FlowPreview::class)
 internal fun <T> Flow<T>.withStreamIdleTimeout(
     idleTimeoutMs: Long = STREAM_IDLE_WATCHDOG_TIMEOUT_MS,
@@ -104,6 +113,7 @@ internal fun <T> Flow<T>.withStreamIdleTimeout(
 ): Flow<T> = if (watchdogController != null) {
     flow {
         coroutineScope {
+            watchdogController.resetForAttempt()
             watchdogController.start(this)
             val heartbeatJob = if (streamHeartbeat != null) {
                 launch {
@@ -118,7 +128,7 @@ internal fun <T> Flow<T>.withStreamIdleTimeout(
                     delay(500L)
                     when (watchdogController.evaluate()) {
                         is me.rerere.rikkahub.data.ai.watchdog.WatchdogDecision.SwitchModelRequested -> {
-                            throw StreamIdleTimeoutException("User requested immediate switch to secondary model")
+                            throw UserRequestedModelSwitchException("User requested immediate switch to secondary model")
                         }
                         is me.rerere.rikkahub.data.ai.watchdog.WatchdogDecision.TimeoutExpired -> {
                             throw StreamIdleTimeoutException(
@@ -159,6 +169,7 @@ internal fun shouldFallbackToBackupModel(
     failure: Throwable,
     receivedMeaningfulOutput: Boolean,
 ): Boolean {
+    if (failure is UserRequestedModelSwitchException) return true
     if (receivedMeaningfulOutput) return false
     if (isCancellationFailure(failure) || isContextLimitFailure(failure)) return false
     if (failure is StreamIdleTimeoutException || failure is IOException) return true
@@ -170,6 +181,9 @@ internal fun shouldFallbackToBackupModel(
             ex.statusCode ?: Regex("""HTTP\s+(\d{3})""", RegexOption.IGNORE_CASE)
                 .find(ex.message.orEmpty())?.groupValues?.get(1)?.toIntOrNull()
         }
+    if (statusCode == 404 || failure.message?.contains("bad_response_status_code", ignoreCase = true) == true) {
+        return true
+    }
     return statusCode in RETRYABLE_4XX_STATUS_CODES || (statusCode != null && statusCode in 500..599)
 }
 
@@ -249,6 +263,9 @@ internal fun shouldRetryGenerationStreamFailure(
     receivedMeaningfulOutput: Boolean,
     hasFallbackModel: Boolean = false,
 ): Boolean {
+    if (failure is UserRequestedModelSwitchException) {
+        return false
+    }
     if (receivedMeaningfulOutput || retryAttempt >= maxRetries.coerceAtLeast(0).toLong()) {
         return false
     }
@@ -330,9 +347,18 @@ private fun isContextLimitFailure(failure: Throwable): Boolean =
                 "exceeds the context limit" in text
         }
 
-private fun generationStreamRetryDelayMs(retryAttempt: Long): Long =
-    ((retryAttempt + 1) * GENERATION_STREAM_RETRY_INITIAL_DELAY_MS)
-        .coerceAtMost(GENERATION_STREAM_RETRY_MAX_DELAY_MS)
+private fun generationStreamRetryDelayMs(retryAttempt: Long, failure: Throwable? = null): Long {
+    val isRateLimit = failure != null && generateSequence(failure) { it.cause }
+        .take(8)
+        .filterIsInstance<HttpException>()
+        .any { it.statusCode == 429 || it.message?.contains("limit_burst_rate", ignoreCase = true) == true }
+    return if (isRateLimit) {
+        ((retryAttempt + 1) * 2_500L).coerceAtMost(12_000L)
+    } else {
+        ((retryAttempt + 1) * GENERATION_STREAM_RETRY_INITIAL_DELAY_MS)
+            .coerceAtMost(GENERATION_STREAM_RETRY_MAX_DELAY_MS)
+    }
+}
 
 private fun retryFailureReason(failure: Throwable): String =
     generateSequence(failure) { it.cause }
@@ -867,7 +893,13 @@ class GenerationLoop(
                             onWatchdogControllerAttached = onWatchdogControllerAttached,
                         )
                     } catch (primaryErr: Throwable) {
-                        val subAgentSecModelId = me.rerere.rikkahub.subagent.SubAgentFallbackPolicies.onGenerationFailed(conversationId)
+                        if (primaryErr is CancellationException) throw primaryErr
+                        val subAgentSecModelId = if (primaryErr is UserRequestedModelSwitchException) {
+                            me.rerere.rikkahub.subagent.SubAgentFallbackPolicies.getSecondaryModel(conversationId)
+                        } else {
+                            me.rerere.rikkahub.subagent.SubAgentFallbackPolicies.onGenerationFailed(conversationId)
+                                ?: me.rerere.rikkahub.subagent.SubAgentFallbackPolicies.getSecondaryModel(conversationId)
+                        }
                         val subAgentSecModel = subAgentSecModelId?.let { settings.findModelById(it) }
                         val fallbackCandidates = if (shouldFallbackToBackupModel(primaryErr, emittedStepOutput)) {
                             resolveFallbackModels(settings, effectiveModel, subAgentSecModel)
@@ -877,6 +909,7 @@ class GenerationLoop(
                         val backupModel = fallbackCandidates.firstOrNull()
                         val backupProvider = backupModel?.findProvider(settings.providers)?.takeIf { it.enabled }
                         if (backupModel != null && backupProvider != null) {
+                            clearRetryStatus(processingStatus)
                             Log.w(
                                 TAG,
                                 "Primary model ${effectiveModel.modelId} failed; cascading to backup model ${backupModel.modelId}",
@@ -894,51 +927,69 @@ class GenerationLoop(
                                     backupModel.abilities
                                 }
                             )
-                            generateInternal(
-                                assistant = assistant,
-                                settings = settings,
-                                systemAddendum = systemAddendum,
-                                messages = messages,
-                                onUpdateMessages = {
-                                    val tail = it.drop(unchangedPrefixCount).transforms(
-                                        transformers = outputTransformers,
-                                        context = context,
-                                        model = effectiveBackupModel,
-                                        assistant = assistant,
-                                        settings = settings
-                                    )
-                                    messages = if (unchangedPrefixCount == 0) tail else unchangedPrefix + tail
-                                    val visualTail = tail.visualTransforms(
-                                        transformers = outputTransformers,
-                                        context = context,
-                                        model = effectiveBackupModel,
-                                        assistant = assistant,
-                                        settings = settings
-                                    )
-                                    emit(
-                                        GenerationChunk.Messages(
-                                            if (unchangedPrefixCount == 0) visualTail else visualPrefix + visualTail
+                            try {
+                                generateInternal(
+                                    assistant = assistant,
+                                    settings = settings,
+                                    systemAddendum = systemAddendum,
+                                    messages = messages,
+                                    onUpdateMessages = {
+                                        val tail = it.drop(unchangedPrefixCount).transforms(
+                                            transformers = outputTransformers,
+                                            context = context,
+                                            model = effectiveBackupModel,
+                                            assistant = assistant,
+                                            settings = settings
                                         )
-                                    )
-                                },
-                                transformers = inputTransformers,
-                                model = effectiveBackupModel,
-                                providerImpl = backupProviderImpl,
-                                provider = backupProvider,
-                                tools = activeToolsForModel,
-                                memories = memories ?: emptyList(),
-                                stream = assistant.streamOutput,
-                                processingStatus = processingStatus,
-                                conversationSystemPrompt = conversationSystemPrompt,
-                                conversationId = conversationId,
-                                conversationModeInjectionIds = conversationModeInjectionIds,
-                                conversationLorebookIds = conversationLorebookIds,
-                                workspaceCwd = workspaceCwd,
-                                streamHeartbeat = streamHeartbeat,
-                                onWatchdogControllerAttached = onWatchdogControllerAttached,
-                            )
+                                        messages = if (unchangedPrefixCount == 0) tail else unchangedPrefix + tail
+                                        val visualTail = tail.visualTransforms(
+                                            transformers = outputTransformers,
+                                            context = context,
+                                            model = effectiveBackupModel,
+                                            assistant = assistant,
+                                            settings = settings
+                                        )
+                                        emit(
+                                            GenerationChunk.Messages(
+                                                if (unchangedPrefixCount == 0) visualTail else visualPrefix + visualTail
+                                            )
+                                        )
+                                    },
+                                    transformers = inputTransformers,
+                                    model = effectiveBackupModel,
+                                    providerImpl = backupProviderImpl,
+                                    provider = backupProvider,
+                                    tools = activeToolsForModel,
+                                    memories = memories ?: emptyList(),
+                                    stream = assistant.streamOutput,
+                                    processingStatus = processingStatus,
+                                    conversationSystemPrompt = conversationSystemPrompt,
+                                    conversationId = conversationId,
+                                    conversationModeInjectionIds = conversationModeInjectionIds,
+                                    conversationLorebookIds = conversationLorebookIds,
+                                    workspaceCwd = workspaceCwd,
+                                    streamHeartbeat = streamHeartbeat,
+                                    onWatchdogControllerAttached = onWatchdogControllerAttached,
+                                )
+                            } catch (backupErr: Throwable) {
+                                if (backupErr is CancellationException || backupErr is ProviderGenerationException) {
+                                    throw backupErr
+                                }
+                                throw ProviderGenerationException(
+                                    providerName = backupProvider.name,
+                                    modelId = effectiveBackupModel.modelId,
+                                    modelDisplayName = effectiveBackupModel.displayName.ifBlank { effectiveBackupModel.modelId },
+                                    cause = backupErr,
+                                )
+                            }
                         } else {
-                            throw primaryErr
+                            if (primaryErr is ProviderGenerationException) throw primaryErr
+                            throw ProviderGenerationException(
+                                providerName = provider.name,
+                                modelId = effectiveModel.modelId,
+                                modelDisplayName = effectiveModel.displayName.ifBlank { effectiveModel.modelId },
+                                cause = primaryErr,
+                            )
                         }
                     }
                 } catch (t: Throwable) {
@@ -952,10 +1003,12 @@ class GenerationLoop(
                         // conversation with tool parts in an in-between state and downstream
                         // filtering misbehaves. We mark them Denied with a generation_failed
                         // envelope so the shape is deterministic on replay.
+                        // Never overwrite tools that already finished with output!
                         val lastMsg = messages.lastOrNull()
                         if (lastMsg != null) {
                             val newParts = lastMsg.parts.map { part ->
                                 if (part is UIMessagePart.Tool &&
+                                    part.output.isEmpty() &&
                                     (part.approvalState is ToolApprovalState.Auto ||
                                         part.approvalState is ToolApprovalState.Pending)) {
                                     part.copy(approvalState = ToolApprovalState.Denied(
@@ -1785,7 +1838,7 @@ class GenerationLoop(
                         // per-attempt "did anything arrive" flag so onCompletion's transport-failure
                         // check reflects this attempt, not a chunk seen in an earlier one.
                         receivedAnyChunk = false
-                        val delayMs = generationStreamRetryDelayMs(retryAttempt)
+                        val delayMs = generationStreamRetryDelayMs(retryAttempt, cause)
                         processingStatus.value = retryStatusText(
                             context = context,
                             retryNumber = retryAttempt + 1,

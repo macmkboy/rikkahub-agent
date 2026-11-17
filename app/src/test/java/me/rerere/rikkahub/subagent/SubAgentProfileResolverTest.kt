@@ -469,4 +469,48 @@ class SubAgentProfileResolverTest {
         assertTrue(result is SubAgentModelResolver.Result.Resolved)
         assertEquals(secModel.id, (result as SubAgentModelResolver.Result.Resolved).modelId)
     }
+
+    @Test fun `resolveProfileModel does not jump to another provider when pinned provider is disabled`() {
+        val disabledPrimaryModel = me.rerere.ai.provider.Model(
+            modelId = "glm-5.3-flash-free",
+            displayName = "GLM 5.3 Flash",
+            type = me.rerere.ai.provider.ModelType.CHAT,
+        )
+        val otherProviderSameSlug = me.rerere.ai.provider.Model(
+            modelId = "glm-5.3-flash-free",
+            displayName = "GLM 5.3 Flash (Other)",
+            type = me.rerere.ai.provider.ModelType.CHAT,
+        )
+        val secondaryBackup = me.rerere.ai.provider.Model(
+            modelId = "gemini-3.8-flash",
+            displayName = "Gemini 3.8 Flash",
+            type = me.rerere.ai.provider.ModelType.CHAT,
+        )
+        val disabledProvider = me.rerere.ai.provider.ProviderSetting.OpenAI(
+            name = "Kiosapi",
+            enabled = false,
+            models = listOf(disabledPrimaryModel),
+        )
+        val enabledOtherProvider = me.rerere.ai.provider.ProviderSetting.OpenAI(
+            name = "HCNSEC",
+            enabled = true,
+            models = listOf(otherProviderSameSlug, secondaryBackup),
+        )
+        val profile = SubAgentProfile(
+            name = "critic",
+            description = "Reviews diffs",
+            systemPrompt = "You are critic.",
+            modelId = disabledPrimaryModel.id,
+            modelSlug = "glm-5.3-flash-free",
+            providerId = disabledProvider.id,
+            secondaryModelId = secondaryBackup.id,
+            secondaryModelSlug = "gemini-3.8-flash",
+            secondaryProviderId = enabledOtherProvider.id,
+            enabled = true,
+        )
+
+        val result = SubAgentModelResolver.resolveProfileModel(profile, listOf(disabledProvider, enabledOtherProvider))
+        assertTrue(result is SubAgentModelResolver.Result.Resolved)
+        assertEquals(secondaryBackup.id, (result as SubAgentModelResolver.Result.Resolved).modelId)
+    }
 }

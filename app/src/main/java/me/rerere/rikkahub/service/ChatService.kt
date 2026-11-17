@@ -434,6 +434,8 @@ data class ChatError(
     val conversationId: Uuid? = null,
     val timestamp: Long = System.currentTimeMillis(),
     val solution: ChatErrorSolution? = null,
+    val providerName: String? = null,
+    val modelName: String? = null,
 )
 
 enum class ChatErrorSolution {
@@ -622,9 +624,20 @@ class ChatService(
         conversationId: Uuid? = null,
         title: String? = null,
         solution: ChatErrorSolution? = null,
+        providerName: String? = null,
+        modelName: String? = null,
     ) {
         if (error is CancellationException) return
-        _errors.update { it + ChatError(title = title, error = error, conversationId = conversationId, solution = solution) }
+        _errors.update {
+            it + ChatError(
+                title = title,
+                error = error,
+                conversationId = conversationId,
+                solution = solution,
+                providerName = providerName,
+                modelName = modelName,
+            )
+        }
     }
 
     fun dismissError(id: Uuid) {
@@ -1766,6 +1779,28 @@ class ChatService(
             me.rerere.rikkahub.data.ai.tools.HeadlessConversations.isHeadless(conversationId) ||
             initialConversation.title.startsWith("[Sub-agent")
 
+        // Ensure sub-agent fallback policy is populated even after app restart or retry/continue
+        if (isSubAgent && me.rerere.rikkahub.subagent.SubAgentFallbackPolicies.getConfig(conversationId) == null) {
+            val profileNameFromTitle = if (initialConversation.title.startsWith("[Sub-agent: ")) {
+                initialConversation.title.substringAfter("[Sub-agent: ", "").substringBefore("]").trim()
+            } else null
+            val profile = profileNameFromTitle?.let { name ->
+                settings.subAgents.firstOrNull { it.name.equals(name, ignoreCase = true) }
+            }
+            if (profile != null) {
+                val secRes = me.rerere.rikkahub.subagent.SubAgentModelResolver.resolveSecondaryProfileModel(profile, settings.providers)
+                val secModelId = (secRes as? me.rerere.rikkahub.subagent.SubAgentModelResolver.Result.Resolved)?.modelId
+                    ?: profile.secondaryModelId
+                if (secModelId != null) {
+                    me.rerere.rikkahub.subagent.SubAgentFallbackPolicies.register(
+                        conversationId = conversationId,
+                        secondaryModelId = secModelId,
+                        maxFailsBeforeSwitch = profile.maxFailsBeforeSwitch,
+                    )
+                }
+            }
+        }
+
         // For sub-agents / headless runs, prioritize the conversation's own chatModelId directly
         // and fall back to the global default model before inspecting assistant.chatModelId.
         // This ensures a broken/disabled/missing parent assistant model does not crash sub-agents.
@@ -2359,7 +2394,16 @@ class ChatService(
             }
 
             it.printStackTrace()
-            addError(it, conversationId, title = context.getString(R.string.error_title_generation))
+            val providerErr = generateSequence(it) { c -> c.cause }
+                .filterIsInstance<me.rerere.rikkahub.data.ai.ProviderGenerationException>()
+                .firstOrNull()
+            addError(
+                error = providerErr?.cause ?: it,
+                conversationId = conversationId,
+                title = context.getString(R.string.error_title_generation),
+                providerName = providerErr?.providerName ?: resolvedProvider.name,
+                modelName = providerErr?.modelDisplayName ?: model.displayName.ifBlank { model.modelId },
+            )
             Logging.log(TAG, "handleMessageComplete: $it")
             Logging.log(TAG, it.stackTraceToString())
         }.onSuccess {

@@ -312,8 +312,8 @@ internal object SubAgentModelResolver {
             }
         }
 
-        // Tier 3 & 4: Model slug matching across enabled providers
-        if (!modelSlug.isNullOrBlank()) {
+        // Tier 3 & 4: Model slug matching across enabled providers (only when no explicit providerId was pinned)
+        if (providerId == null && !modelSlug.isNullOrBlank()) {
             val bySlug = chatModels.filter { (_, model) -> model.modelId.equals(modelSlug, ignoreCase = true) }
             if (bySlug.size == 1) {
                 val (provider, model) = bySlug[0]
