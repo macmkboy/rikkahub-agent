@@ -2,8 +2,12 @@ package me.rerere.rikkahub.data.ai
 
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
+import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.providers.openai.ResponseStreamErrorException
 import me.rerere.ai.util.HttpException
+import me.rerere.rikkahub.data.datastore.Settings
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -276,5 +280,90 @@ class GenerationHandlerTransportRetryTest {
                 hasFallbackModel = true,
             )
         )
+    }
+
+    @Test
+    fun `resolveFallbackModels does not fall back to fastModelId or currentChatModel when fallbackModelId is null`() {
+        val primaryModel = Model(modelId = "gemini-4-hydrogen-sonar")
+        val globalChatModel = Model(modelId = "gpt-5")
+        val fastModel = Model(modelId = "gpt-4o-mini")
+        val provider = ProviderSetting.OpenAI(
+            enabled = true,
+            name = "Google",
+            models = listOf(primaryModel, globalChatModel, fastModel),
+        )
+        val settings = Settings(
+            chatModelId = globalChatModel.id,
+            fastModelId = fastModel.id,
+            fallbackModelId = null,
+            providers = listOf(provider),
+        )
+
+        val candidates = resolveFallbackModels(
+            settings = settings,
+            primaryModel = primaryModel,
+        )
+
+        assertTrue(candidates.isEmpty())
+    }
+
+    @Test
+    fun `resolveFallbackModels includes configured fallbackModelId and prioritizes subAgentSecondaryModel`() {
+        val primaryModel = Model(modelId = "gemini-4-hydrogen-sonar")
+        val fallbackModel = Model(modelId = "claude-sonnet-4-6")
+        val subAgentSecondary = Model(modelId = "gpt-5")
+        val fastModel = Model(modelId = "gpt-4o-mini")
+        val provider = ProviderSetting.OpenAI(
+            enabled = true,
+            name = "Provider",
+            models = listOf(primaryModel, fallbackModel, subAgentSecondary, fastModel),
+        )
+        val settings = Settings(
+            chatModelId = primaryModel.id,
+            fastModelId = fastModel.id,
+            fallbackModelId = fallbackModel.id,
+            providers = listOf(provider),
+        )
+
+        val mainChatCandidates = resolveFallbackModels(
+            settings = settings,
+            primaryModel = primaryModel,
+        )
+        assertEquals(listOf(fallbackModel), mainChatCandidates)
+
+        val subAgentCandidates = resolveFallbackModels(
+            settings = settings,
+            primaryModel = primaryModel,
+            subAgentSecondaryModel = subAgentSecondary,
+        )
+        assertEquals(listOf(subAgentSecondary, fallbackModel), subAgentCandidates)
+    }
+
+    @Test
+    fun `resolveFallbackModels ignores fallbackModelId when it matches primaryModel or provider is disabled`() {
+        val primaryModel = Model(modelId = "gemini-4-hydrogen-sonar")
+        val disabledFallback = Model(modelId = "claude-sonnet-4-6")
+        val primaryProvider = ProviderSetting.OpenAI(
+            enabled = true,
+            name = "Primary",
+            models = listOf(primaryModel),
+        )
+        val disabledProvider = ProviderSetting.OpenAI(
+            enabled = false,
+            name = "Disabled",
+            models = listOf(disabledFallback),
+        )
+
+        val sameAsPrimarySettings = Settings(
+            fallbackModelId = primaryModel.id,
+            providers = listOf(primaryProvider),
+        )
+        assertTrue(resolveFallbackModels(sameAsPrimarySettings, primaryModel).isEmpty())
+
+        val disabledProviderSettings = Settings(
+            fallbackModelId = disabledFallback.id,
+            providers = listOf(primaryProvider, disabledProvider),
+        )
+        assertTrue(resolveFallbackModels(disabledProviderSettings, primaryModel).isEmpty())
     }
 }

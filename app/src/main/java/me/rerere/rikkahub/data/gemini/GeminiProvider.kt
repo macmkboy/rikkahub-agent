@@ -210,14 +210,12 @@ class GeminiProvider(
                 try {
                     val payload = json.parseToJsonElement(data).jsonObject
                     payload["error"]?.jsonObject?.let { error ->
+                        val (exception, classification) = resolveGeminiEmbeddedStreamError(data, error, json)
                         resumeOnce(
                             GeminiStreamAttemptOutcome.Failure(
-                                cause = IllegalStateException(
-                                    "Cloud Code Assist error: " +
-                                        (error["message"]?.jsonPrimitive?.contentOrNull ?: "unknown")
-                                ),
+                                cause = exception,
                                 emitted = emitted,
-                                classification = classifyGeminiError(null, data, json),
+                                classification = classification,
                             )
                         )
                         eventSource.cancel()
@@ -539,6 +537,22 @@ private fun resolveStreamFailureCause(
         Logging.log(TAG, "onFailure: failed to read error body, detail lost: ${e.javaClass.simpleName}: ${e.message}")
         t ?: e
     }
+}
+
+internal fun resolveGeminiEmbeddedStreamError(
+    data: String,
+    error: JsonObject,
+    json: Json,
+): Pair<HttpException, GeminiErrorClassification> {
+    val classification = classifyGeminiError(null, data, json)
+    val exception = HttpException(
+        parseErrorMessage(data, json)
+            ?: ("Cloud Code Assist error: " +
+                (error["message"]?.jsonPrimitive?.contentOrNull ?: "unknown")),
+        statusCode = classification.status,
+        rawBody = data,
+    )
+    return exception to classification
 }
 
 /**

@@ -53,7 +53,6 @@ import me.rerere.ai.util.encodeBase64
 import me.rerere.ai.util.json
 import me.rerere.ai.util.mergeCustomBody
 import me.rerere.ai.util.mergeCustomHeaders
-import me.rerere.ai.util.parseErrorDetail
 import me.rerere.ai.util.stringSafe
 import me.rerere.common.http.await
 import me.rerere.common.http.jsonArrayOrNull
@@ -92,7 +91,12 @@ internal class InteractionsAPI(
         // await() waits for the response headers; reading the body can still block.
         client.newCall(request).await().use { response ->
             if (!response.isSuccessful) {
-                throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
+                throw resolveGoogleStreamFailure(
+                    t = null,
+                    responseCode = response.code,
+                    responseMessage = response.message,
+                    bodyStr = response.body.stringSafe(),
+                )
             }
             val bodyJson = json.parseToJsonElement(response.body.string()).jsonObject
             parseInteraction(bodyJson, fallbackModel = params.model.modelId)
@@ -138,20 +142,19 @@ internal class InteractionsAPI(
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-                var exception = t
-
-                val bodyRaw = response?.body?.stringSafe()
-                try {
-                    if (!bodyRaw.isNullOrBlank()) {
-                        exception = json.parseToJsonElement(bodyRaw).parseErrorDetail(statusCode = response?.code, rawBody = bodyRaw)
-                    } else if (t == null && response != null) {
-                        exception = Exception("Unknown error: ${response.code}")
-                    }
+                val exception = try {
+                    val bodyRaw = if (t == null) response?.body?.stringSafe() else null
+                    resolveGoogleStreamFailure(
+                        t = t,
+                        responseCode = response?.code,
+                        responseMessage = response?.message,
+                        bodyStr = bodyRaw,
+                    )
                 } catch (e: Throwable) {
-                    Log.w(TAG, "onFailure: failed to parse from $bodyRaw")
-                } finally {
-                    close(exception ?: Exception("Stream failed"))
+                    Log.w(TAG, "onFailure: failed to parse error body", e)
+                    t ?: e
                 }
+                close(exception)
             }
 
             override fun onClosed(eventSource: EventSource) {

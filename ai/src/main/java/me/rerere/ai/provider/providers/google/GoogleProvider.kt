@@ -62,12 +62,14 @@ import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.metadataAs
 import me.rerere.ai.ui.toMetadata
+import me.rerere.ai.util.HttpException
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.configureSessionHeaders
 import me.rerere.ai.util.encodeBase64
 import me.rerere.ai.util.json
 import me.rerere.ai.util.mergeCustomBody
+import me.rerere.ai.util.parseErrorDetail
 import me.rerere.ai.util.sanitizeAndCapTools
 import me.rerere.ai.util.mergeCustomHeaders
 import me.rerere.ai.util.redactSecrets
@@ -238,7 +240,12 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
 
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
+            throw resolveGoogleStreamFailure(
+                t = null,
+                responseCode = response.code,
+                responseMessage = response.message,
+                bodyStr = response.body.stringSafe(),
+            )
         }
 
         val bodyStr = response.body.string()
@@ -340,32 +347,20 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 t: Throwable?,
                 response: Response?
             ) {
-                var exception = t
-
                 Log.w(TAG, "onFailure: ${t?.message}", t)
-
-                try {
-                    if (t == null && response != null) {
-                        val bodyStr = response.body.stringSafe()
-                        if (!bodyStr.isNullOrEmpty()) {
-                            val bodyElement = json.parseToJsonElement(bodyStr)
-                            Log.d(TAG, "onFailure: error body $bodyElement")
-                            if (bodyElement is JsonObject) {
-                                exception = Exception(
-                                    bodyElement["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content
-                                        ?: "unknown"
-                                )
-                            }
-                        } else {
-                            exception = Exception("Unknown error: ${response.code}")
-                        }
-                    }
+                val exception = try {
+                    val bodyStr = if (t == null) response?.body?.stringSafe() else null
+                    resolveGoogleStreamFailure(
+                        t = t,
+                        responseCode = response?.code,
+                        responseMessage = response?.message,
+                        bodyStr = bodyStr,
+                    )
                 } catch (e: Throwable) {
                     Log.w(TAG, "onFailure: failed to parse error body", e)
-                    exception = e
-                } finally {
-                    close(exception ?: Exception("Stream failed"))
+                    t ?: e
                 }
+                close(exception)
             }
 
             override fun onClosed(eventSource: EventSource) {
@@ -1123,4 +1118,28 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             emit(item)
         }
     }
+}
+
+internal fun resolveGoogleStreamFailure(
+    t: Throwable?,
+    responseCode: Int?,
+    responseMessage: String?,
+    bodyStr: String?,
+): Throwable {
+    if (t != null) return t
+    if (responseCode == null) return Exception("Stream failed")
+    if (!bodyStr.isNullOrBlank()) {
+        val parsed = runCatching {
+            json.parseToJsonElement(bodyStr).parseErrorDetail(
+                statusCode = responseCode,
+                rawBody = bodyStr,
+            )
+        }.getOrNull()
+        if (parsed != null) return parsed
+        val snippet = bodyStr.take(300).replace(Regex("<[^>]*>"), " ").trim()
+        val detail = snippet.ifBlank { responseMessage.orEmpty() }.ifBlank { "Unknown error" }
+        return HttpException("HTTP $responseCode: $detail", statusCode = responseCode, rawBody = bodyStr)
+    }
+    val detail = responseMessage?.takeIf { it.isNotBlank() } ?: "Unknown error"
+    return HttpException("HTTP $responseCode: $detail", statusCode = responseCode)
 }

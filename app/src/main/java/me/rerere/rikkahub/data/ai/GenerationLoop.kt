@@ -72,7 +72,6 @@ import me.rerere.rikkahub.data.datastore.DEFAULT_AUTO_MODEL_ID
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.datastore.findProvider
-import me.rerere.rikkahub.data.datastore.getCurrentChatModel
 import me.rerere.rikkahub.data.ai.prompts.buildMemoryPrompt
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.MemoryFile
@@ -218,8 +217,6 @@ internal fun resolveFallbackModels(
     }
 
     addUnique(settings.findModelById(settings.fallbackModelId))
-    addUnique(settings.getCurrentChatModel())
-    addUnique(settings.findModelById(settings.fastModelId))
     return candidates
 }
 
@@ -1747,9 +1744,11 @@ class GenerationLoop(
         )
 
         val subAgentFallback = conversationId?.let { me.rerere.rikkahub.subagent.SubAgentFallbackPolicies.getConfig(it) }
-        val hasFallbackCandidate = subAgentFallback?.secondaryModelId != null ||
-            settings.fallbackModelId != null ||
-            settings.fastModelId != null
+        val hasFallbackCandidate = resolveFallbackModels(
+            settings = settings,
+            primaryModel = model,
+            subAgentSecondaryModel = subAgentFallback?.secondaryModelId?.let { settings.findModelById(it) },
+        ).isNotEmpty()
         val maxStreamRetries = when {
             subAgentFallback != null && subAgentFallback.secondaryModelId != null ->
                 (subAgentFallback.maxFailsBeforeSwitch - 1).coerceAtLeast(0)
