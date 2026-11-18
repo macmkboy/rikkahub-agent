@@ -544,7 +544,10 @@ private val RETRY_DELAY_VALUE_PATTERN = Regex("""^([0-9.]+)(ms|s)$""")
 // the RATE_LIMIT_EXCEEDED reason for a per-model daily quota - distinguishable only by this phrase
 // in error.message - so that case is promoted to QUOTA_EXHAUSTED the same way rate-limit.ts:162
 // promotes it, regardless of any retry delay.
-private val ANTIGRAVITY_MODEL_QUOTA_PATTERN = Regex("""\bexhausted your capacity on this model\b""", RegexOption.IGNORE_CASE)
+private val ANTIGRAVITY_MODEL_QUOTA_PATTERN = Regex(
+    """\b(exhausted your capacity on this model|resource has been exhausted|check quota|quota_exhausted)\b""",
+    RegexOption.IGNORE_CASE,
+)
 
 /**
  * How a Cloud Code Assist error response should steer the caller's retry loop.
@@ -591,7 +594,8 @@ internal fun classifyGeminiError(statusCode: Int?, body: String?, json: Json): G
         null
     }
     val message = error?.get("message")?.jsonPrimitive?.contentOrNull
-    if (reason == "RATE_LIMIT_EXCEEDED" && message != null &&
+    if ((reason == "RATE_LIMIT_EXCEEDED" || reason == null || rpcStatus?.uppercase() == "RESOURCE_EXHAUSTED") &&
+        message != null &&
         ANTIGRAVITY_MODEL_QUOTA_PATTERN.containsMatchIn(message)
     ) {
         reason = "QUOTA_EXHAUSTED"

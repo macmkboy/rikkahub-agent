@@ -91,14 +91,14 @@ class ContextBrokerTest {
         val fullPrompt = bundle.renderFullPrompt()
 
         val personaIdx = fullPrompt.indexOf("Persona")
+        val rulesIdx = fullPrompt.indexOf("Strict rules")
         val toolIdx = fullPrompt.indexOf("Tool A")
         val memIdx = fullPrompt.indexOf("Memory data")
         val chatsIdx = fullPrompt.indexOf("Recent chat")
-        val rulesIdx = fullPrompt.indexOf("Strict rules")
 
-        assertTrue(personaIdx < toolIdx)
+        assertTrue(personaIdx < rulesIdx)
+        assertTrue(rulesIdx < toolIdx)
         assertTrue(toolIdx < memIdx)
         assertTrue(memIdx < chatsIdx)
-        assertTrue(chatsIdx < rulesIdx)
     }
 }

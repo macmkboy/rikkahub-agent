@@ -26,17 +26,17 @@ data class ContextBundle(
     /**
      * Splits into stable (cacheable prefix) and volatile sections to optimize KV prompt caching.
      *
-     * Stable: Assistant persona, tools, project doc, subagent profile, skills.
-     * Volatile: Memory, recent chats, workspace state, rules, dynamic addendum.
+     * Stable: Assistant persona, subagent profile, rules, project doc, tool guidance.
+     * Volatile: Dynamic skills, workspace state, memory, recent chats, per-call addendum.
      */
     fun renderSections(): Pair<String, String> {
         val sorted = items.sortedBy { it.source.renderOrder }
         val stableSources = setOf(
             ContextSource.SYSTEM_INSTRUCTION,
             ContextSource.SUBAGENT_PROFILE,
-            ContextSource.TOOL_GUIDANCE,
+            ContextSource.RULES,
             ContextSource.PROJECT_DOC,
-            ContextSource.SKILLS,
+            ContextSource.TOOL_GUIDANCE,
         )
 
         val stable = sorted

@@ -14,18 +14,18 @@ enum class ContextSource(
     val isPinned: Boolean = false,
 ) {
     // Pinned sources: highest priorities (90-100), never dropped during token budget trimming.
-    // Standing rules render last as the final, authoritative instruction block.
-    RULES("rules", defaultPriority = 100, renderOrder = 8, isPinned = true),
-    MEMORY("memory", defaultPriority = 90, renderOrder = 6, isPinned = true),
+    // Static standing rules render in the stable prefix so prompt caching can be reused.
     SYSTEM_INSTRUCTION("system_instruction", defaultPriority = 80, renderOrder = 0, isPinned = true),
-
-    // Situational sources: prioritised and subject to token budgeting.
     SUBAGENT_PROFILE("subagent_profile", defaultPriority = 70, renderOrder = 1),
-    TOOL_GUIDANCE("tool_guidance", defaultPriority = 60, renderOrder = 2),
+    RULES("rules", defaultPriority = 100, renderOrder = 2, isPinned = true),
     PROJECT_DOC("project_doc", defaultPriority = 50, renderOrder = 3),
-    SKILLS("skills", defaultPriority = 40, renderOrder = 4),
-    WORKSPACE_STATE("workspace_state", defaultPriority = 30, renderOrder = 5),
-    RECENT_CHATS("recent_chats", defaultPriority = 20, renderOrder = 7);
+    TOOL_GUIDANCE("tool_guidance", defaultPriority = 60, renderOrder = 4),
+
+    // Situational volatile sources: subject to token budgeting and dynamic per-turn change.
+    SKILLS("skills", defaultPriority = 40, renderOrder = 5),
+    WORKSPACE_STATE("workspace_state", defaultPriority = 30, renderOrder = 6),
+    MEMORY("memory", defaultPriority = 90, renderOrder = 7, isPinned = true),
+    RECENT_CHATS("recent_chats", defaultPriority = 20, renderOrder = 8);
 
     companion object {
         val ORDER: List<ContextSource> = entries.sortedBy { it.renderOrder }
