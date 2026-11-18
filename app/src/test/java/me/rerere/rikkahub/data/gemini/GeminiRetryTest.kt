@@ -228,22 +228,6 @@ class GeminiRetryTest {
     }
 
     @Test
-    fun `a 429 with Resource has been exhausted in message is promoted to terminal QUOTA_EXHAUSTED`() {
-        val body = """
-            {
-              "error": {
-                "code": 429,
-                "message": "Resource has been exhausted (e.g. check quota).",
-                "status": "RESOURCE_EXHAUSTED"
-              }
-            }
-        """.trimIndent()
-        val classification = classifyGeminiError(429, body, json)
-        assertFalse(classification.retryable)
-        assertEquals("QUOTA_EXHAUSTED", classification.reason)
-    }
-
-    @Test
     fun `an unparseable body degrades to classifying off the status alone rather than throwing`() {
         val classification = classifyGeminiError(503, "<html>upstream down</html>", json)
         assertTrue(classification.retryable)

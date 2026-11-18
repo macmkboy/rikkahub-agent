@@ -53,7 +53,11 @@ class SystemPromptBuilder(
                 )
             )
         }
-        return bundle.renderSections()
+        val (stable, volatile) = bundle.renderSections()
+        val finalVolatile = if (!systemAddendum.isNullOrBlank()) {
+            if (volatile.isNotBlank()) "$volatile\n${systemAddendum.trim()}" else systemAddendum.trim()
+        } else volatile
+        return stable to finalVolatile
     }
 
     /** Combined single-string prompt (stable then volatile), for callers/providers that do

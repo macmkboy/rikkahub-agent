@@ -199,20 +199,11 @@ class ContextBroker(
             }
 
             ContextSource.RULES -> {
-                val fullRules = buildString {
-                    if (request.rulesPrompt.isNotBlank()) {
-                        append(request.rulesPrompt.trim())
-                    }
-                    if (!request.systemAddendum.isNullOrBlank()) {
-                        if (isNotEmpty()) appendLine("\n")
-                        append(request.systemAddendum.trim())
-                    }
-                }.trim()
-
-                if (fullRules.isNotBlank()) {
+                val rules = request.rulesPrompt.trim()
+                if (rules.isNotBlank()) {
                     ContextItem(
                         source = ContextSource.RULES,
-                        text = fullRules,
+                        text = rules,
                         isPinned = true,
                         priority = ContextSource.RULES.defaultPriority,
                     )
