@@ -579,7 +579,7 @@ private fun ChatPageContent(
                 loading = loadingJob != null,
                 processingStatus = processingStatus,
                 streamHeartbeat = streamHeartbeat,
-                onExtendWatchdog = { vm.extendWatchdog(30) },
+                onExtendWatchdog = { vm.extendWatchdog(120) },
                 onSwitchModel = { vm.switchToSecondaryModel() },
                 onCancelGeneration = { vm.stopGeneration() },
                 previewMode = previewMode,

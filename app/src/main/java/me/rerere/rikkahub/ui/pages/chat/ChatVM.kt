@@ -89,7 +89,7 @@ class ChatVM(
         chatService
             .getStreamHeartbeatFlow(_conversationId)
 
-    fun extendWatchdog(seconds: Long = 30L) {
+    fun extendWatchdog(seconds: Long = 120L) {
         chatService.extendWatchdog(_conversationId, seconds)
     }
 

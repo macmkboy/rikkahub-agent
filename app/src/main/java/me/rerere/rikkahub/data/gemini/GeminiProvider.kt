@@ -529,6 +529,7 @@ private fun resolveStreamFailureCause(
             parseErrorMessage(detail, json)
                 ?: "Cloud Code Assist request failed: $responseCode $detail",
             statusCode = responseCode,
+            rawBody = detail,
         )
     } catch (e: Throwable) {
         // android.util.Log is unmocked in JVM unit tests (throws instead of logging), so this

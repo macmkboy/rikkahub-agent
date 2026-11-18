@@ -847,7 +847,7 @@ class ChatService(
     fun getStreamHeartbeatFlow(conversationId: Uuid): StateFlow<me.rerere.rikkahub.data.ai.watchdog.StreamHeartbeatState?> =
         getOrCreateSession(conversationId).streamHeartbeat
 
-    fun extendWatchdog(conversationId: Uuid, seconds: Long = 30L) {
+    fun extendWatchdog(conversationId: Uuid, seconds: Long = 120L) {
         getOrCreateSession(conversationId).activeWatchdogController?.extendDeadline(seconds)
     }
 

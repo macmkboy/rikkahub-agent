@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,7 +21,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ClipEntry
@@ -119,7 +124,13 @@ fun ErrorCard(
     val scope = rememberCoroutineScope()
     val checkFastModelSettings = stringResource(R.string.chat_page_check_fast_model_settings)
     val linkColor = MaterialTheme.colorScheme.primary
+    var isExpanded by remember { mutableStateOf(false) }
     val rawMessage = error.error.message ?: "Unknown error"
+    val httpEx = generateSequence(error.error) { it.cause }
+        .filterIsInstance<me.rerere.ai.util.HttpException>()
+        .firstOrNull()
+    val rawBody = httpEx?.rawBody?.takeIf { it.isNotBlank() }
+    val hasDistinctRawBody = rawBody != null && rawBody.trim() != rawMessage.trim()
     val displayMessage = if (rawMessage.contains("bad_response_status_code", ignoreCase = true) &&
         rawMessage.contains("openai_error", ignoreCase = true)
     ) {
@@ -139,10 +150,12 @@ fun ErrorCard(
         (error.title?.contains("compression", ignoreCase = true) == true)
     val hasActionChips = (isContextOrCompressionError && onCompactAndRetry != null) || onRetryLastTurn != null
 
-    // Actionable errors stay visible longer (12s) so the user can tap recovery chips
-    LaunchedEffect(error.id, hasActionChips) {
-        delay(if (hasActionChips) 12_000L else 5_000L)
-        onDismiss()
+    // Actionable or user-expanded errors stay visible longer (never dismiss while expanded)
+    LaunchedEffect(error.id, hasActionChips, isExpanded) {
+        if (!isExpanded) {
+            delay(if (hasActionChips) 12_000L else 5_000L)
+            onDismiss()
+        }
     }
 
     Surface(
@@ -187,9 +200,29 @@ fun ErrorCard(
                         text = displayMessage,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
-                        maxLines = 4,
-                        overflow = TextOverflow.Ellipsis,
+                        maxLines = if (isExpanded) Int.MAX_VALUE else 4,
+                        overflow = if (isExpanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable { isExpanded = !isExpanded },
                     )
+                    if (hasDistinctRawBody) {
+                        if (isExpanded) {
+                            Text(
+                                text = "Original response:\n$rawBody",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp),
+                            )
+                        } else {
+                            Text(
+                                text = "Show raw response",
+                                style = MaterialTheme.typography.labelSmall.copy(textDecoration = TextDecoration.Underline),
+                                color = linkColor,
+                                modifier = Modifier.clickable { isExpanded = true },
+                            )
+                        }
+                    }
                     if (error.solution == ChatErrorSolution.CheckFastModelSettings) {
                         Text(
                             text = buildAnnotatedString {
@@ -218,10 +251,17 @@ fun ErrorCard(
                 }
                 IconButton(
                     onClick = {
+                        val fullErrorText = buildString {
+                            append(rawMessage)
+                            if (hasDistinctRawBody) {
+                                append("\n\nOriginal provider response:\n")
+                                append(rawBody)
+                            }
+                        }
                         scope.launch {
                             clipboard.setClipEntry(
                                 ClipEntry(
-                                    clipData = ClipData.newPlainText("Error", rawMessage)
+                                    clipData = ClipData.newPlainText("Error", fullErrorText)
                                 )
                             )
                         }

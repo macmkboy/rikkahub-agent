@@ -41,7 +41,17 @@ class WorkspaceReminderTransformer(
 
         // 与 ChatToolFactory.createWorkspaceToolsIfReady 保持一致: 仅在 shell 就绪时才读取 AGENTS.md 作为工作区指令
         if (workspace != null && workspace.shellStatus == WorkspaceShellStatus.READY.name) {
-            prompt += buildAgentsPrompt(workspace.id, ctx.workspaceCwd)
+            val alreadyHasRules = messages.any { msg ->
+                msg.parts.filterIsInstance<UIMessagePart.Text>().any {
+                    it.text.contains("<workspace_instructions>") ||
+                    it.text.contains("Follow the AGENTS.md instructions below") ||
+                    it.text.contains("# RikkaHub Multi-Agent Universal Policy") ||
+                    (ctx.assistant.workspaceId != null && it.text.contains("AGENTS.md"))
+                }
+            }
+            if (!alreadyHasRules) {
+                prompt += buildAgentsPrompt(workspace.id, ctx.workspaceCwd)
+            }
         }
 
         // 追加到第一条 system 消息; 若不存在则插入一条

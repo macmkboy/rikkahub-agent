@@ -456,7 +456,7 @@ private fun ChatListNormal(
                             ) {
                                 AssistChip(
                                     onClick = onExtendWatchdog,
-                                    label = { Text("Wait 30s", maxLines = 1, softWrap = false) },
+                                    label = { Text("Wait 2m", maxLines = 1, softWrap = false) },
                                 )
                                 if (streamHeartbeat.canSwitchModel) {
                                     AssistChip(

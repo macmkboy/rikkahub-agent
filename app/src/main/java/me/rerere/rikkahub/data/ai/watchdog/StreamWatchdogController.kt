@@ -79,7 +79,7 @@ class StreamWatchdogController(
         tick()
     }
 
-    fun extendDeadline(seconds: Long = 30L) {
+    fun extendDeadline(seconds: Long = 120L) {
         val now = clock()
         val addMs = seconds * 1000L
         val currentIdleMs = now - lastChunkTimeMs.get()
