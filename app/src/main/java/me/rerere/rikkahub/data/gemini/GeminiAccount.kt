@@ -8,6 +8,10 @@ import kotlinx.serialization.Serializable
  * [projectId] is the `cloudaicompanionProject` resolved once at sign-in through
  * loadCodeAssist / onboardUser. Every generate request has to carry it, so it is stored with the
  * tokens rather than rediscovered per request.
+ *
+ * [quotaExhaustedUntil] tracks cooldown epoch milliseconds when this account receives a 429
+ * RESOURCE_EXHAUSTED / QUOTA_EXHAUSTED response from Cloud Code Assist. During cooldown,
+ * round-robin selection bypasses this account in favor of accounts with active quota.
  */
 @Serializable
 data class GeminiAccount(
@@ -21,6 +25,7 @@ data class GeminiAccount(
     val enabled: Boolean = true,
     val tokenStatus: GeminiTokenStatus = GeminiTokenStatus.UNKNOWN,
     val usage: GeminiUsageSnapshot? = null,
+    val quotaExhaustedUntil: Long = 0L,
 )
 
 /**
@@ -51,5 +56,5 @@ enum class GeminiTokenStatus {
     INVALID,
 }
 
-internal fun GeminiAccount.isAvailable(): Boolean =
-    enabled && tokenStatus != GeminiTokenStatus.INVALID
+internal fun GeminiAccount.isAvailable(now: Long = System.currentTimeMillis()): Boolean =
+    enabled && tokenStatus != GeminiTokenStatus.INVALID && quotaExhaustedUntil <= now

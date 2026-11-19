@@ -319,6 +319,15 @@ private fun GeminiAccountCard(
                 },
             )
 
+            if (account.quotaExhaustedUntil > System.currentTimeMillis()) {
+                val remainingSec = ((account.quotaExhaustedUntil - System.currentTimeMillis()) / 1000).coerceAtLeast(1)
+                Text(
+                    text = "Quota limited (cooldown: ${remainingSec}s)",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
             account.usage?.daily?.let {
                 GeminiUsageRow(label = stringResource(R.string.gemini_daily_limit), window = it)
             }
