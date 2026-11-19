@@ -435,7 +435,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         put(
                             "text",
                             systemMessage.parts.filterIsInstance<UIMessagePart.Text>()
-                                .joinToString("\n\n") { it.text })
+                                .joinToString { it.text })
                     })
                 }
             })
@@ -458,25 +458,13 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
 
                     val isGeminiPro =
                         params.model.modelId.contains(Regex("2\\.5.*pro", RegexOption.IGNORE_CASE))
-                    val useThinkingLevel =
-                        ModelRegistry.GEMINI_3_SERIES.match(modelId = params.model.modelId) ||
-                            ModelRegistry.GEMINI_4.match(modelId = params.model.modelId)
 
                     when (params.reasoningLevel) {
-                        ReasoningLevel.AUTO -> {
-                            if (useThinkingLevel) {
-                                when {
-                                    params.model.modelId.contains("-high", ignoreCase = true) -> put("thinkingLevel", "high")
-                                    params.model.modelId.contains("-low", ignoreCase = true) -> put("thinkingLevel", "low")
-                                    params.model.modelId.contains("-medium", ignoreCase = true) -> put("thinkingLevel", "medium")
-                                    params.model.modelId.contains("-minimal", ignoreCase = true) -> put("thinkingLevel", "minimal")
-                                }
-                            }
-                        }
+                        ReasoningLevel.AUTO -> {} // 自动模式，不设置参数
 
                         ReasoningLevel.OFF -> {
-                            if (useThinkingLevel) {
-                                put("thinkingLevel", "minimal")
+                            if (ModelRegistry.GEMINI_3_SERIES.match(modelId = params.model.modelId)) {
+                                put("thinkingLevel", "MINIMAL")
                             } else if (!isGeminiPro) {
                                 put("thinkingBudget", 0)
                                 put("includeThoughts", false)
@@ -484,15 +472,14 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         }
 
                         else -> {
-                            if (useThinkingLevel) {
+                            if (ModelRegistry.GEMINI_3_SERIES.match(modelId = params.model.modelId)) {
                                 when (params.reasoningLevel) {
-                                    ReasoningLevel.LOW -> put("thinkingLevel", "low")
-                                    ReasoningLevel.MEDIUM -> put("thinkingLevel", "medium")
-                                    else -> put("thinkingLevel", "high") // HIGH, XHIGH
+                                    ReasoningLevel.LOW -> put("thinkingLevel", "LOW")
+                                    ReasoningLevel.MEDIUM -> put("thinkingLevel", "MEDIUM")
+                                    else -> put("thinkingLevel", "HIGH") // HIGH, XHIGH, MAX
                                 }
                             } else {
                                 put("thinkingBudget", params.reasoningLevel.budgetTokens)
-                                put("includeThoughts", true)
                             }
                         }
                     }

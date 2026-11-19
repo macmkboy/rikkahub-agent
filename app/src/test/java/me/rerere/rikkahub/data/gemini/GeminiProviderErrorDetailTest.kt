@@ -1,9 +1,7 @@
 package me.rerere.rikkahub.data.gemini
 
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -112,45 +110,5 @@ class GeminiProviderErrorDetailTest {
     @Test
     fun `a null body still returns null`() {
         assertNull(parse(null))
-    }
-
-    @Test
-    fun `resolveGeminiEmbeddedStreamError returns HttpException with statusCode for SSE 400 error`() {
-        val data = """{"error":{"code":400,"message":"Model gemini-4-hydrogen-sonar not supported","status":"INVALID_ARGUMENT"}}"""
-        val errorObj = json.parseToJsonElement(data).jsonObject["error"]!!.jsonObject
-        val (exception, classification) = resolveGeminiEmbeddedStreamError(data, errorObj, json)
-        assertEquals(400, exception.statusCode)
-        assertEquals(data, exception.rawBody)
-        assertTrue(exception.message.orEmpty().contains("gemini-4-hydrogen-sonar"))
-        assertFalse(classification.retryable)
-    }
-
-    @Test
-    fun `resolveGeminiEmbeddedStreamError preserves 429 RESOURCE_EXHAUSTED for GenerationLoop`() {
-        val data = """{"error":{"code":429,"message":"You have exhausted your capacity on this model.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"}]}}"""
-        val errorObj = json.parseToJsonElement(data).jsonObject["error"]!!.jsonObject
-        val (exception, classification) = resolveGeminiEmbeddedStreamError(data, errorObj, json)
-        assertEquals(429, exception.statusCode)
-        assertTrue(exception.message.orEmpty().contains("RESOURCE_EXHAUSTED"))
-        assertFalse(classification.retryable)
-    }
-
-    @Test
-    fun `tagErrorWithAccount prefixes account email to HttpException message`() {
-        val account = GeminiAccount(
-            id = "id-1",
-            name = "Test User",
-            email = "user@example.com",
-            projectId = "proj-1",
-            accessToken = "tok",
-            refreshToken = "ref",
-            expiresAt = Long.MAX_VALUE,
-        )
-        val original = me.rerere.ai.util.HttpException("Resource exhausted", statusCode = 429, rawBody = "raw")
-        val tagged = tagErrorWithAccount(original, account)
-        assertEquals("[user@example.com] Resource exhausted", tagged.message)
-        assertTrue(tagged is me.rerere.ai.util.HttpException)
-        assertEquals(429, (tagged as me.rerere.ai.util.HttpException).statusCode)
-        assertEquals("raw", tagged.rawBody)
     }
 }

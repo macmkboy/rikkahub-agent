@@ -92,25 +92,19 @@ class GeminiAccountRepository internal constructor(
         }
     }
 
-    suspend fun acquireAccount(
-        excludedAccountIds: Set<String> = emptySet(),
-        now: Long = System.currentTimeMillis(),
-    ): GeminiAccount = mutex.withLock {
+    suspend fun acquireAccount(): GeminiAccount = mutex.withLock {
         if (state.accounts.isEmpty()) error("No Google account is signed in")
         repeat(state.accounts.size) {
             val index = selectGeminiAccountIndex(
                 accounts = state.accounts,
                 startIndex = state.nextAccountIndex,
-                excludedAccountIds = excludedAccountIds,
-                now = now,
-            ) ?: return@repeat
+            ) ?: error("No available Google account")
             val candidate = state.accounts[index]
             updateState(state.copy(nextAccountIndex = (index + 1) % state.accounts.size))
             val fresh = runCatching { ensureFreshLocked(candidate) }.getOrNull() ?: return@repeat
             return fresh
         }
-        val suffix = if (excludedAccountIds.isNotEmpty()) " (all attempted accounts exhausted or in cooldown)" else ""
-        error("No available Google account$suffix")
+        error("No available Google account")
     }
 
     suspend fun setEnabled(accountId: String, enabled: Boolean) = mutex.withLock {
@@ -119,16 +113,6 @@ class GeminiAccountRepository internal constructor(
 
     suspend fun markInvalid(accountId: String) = mutex.withLock {
         replaceAccount(accountId) { it.copy(tokenStatus = GeminiTokenStatus.INVALID) }
-    }
-
-    suspend fun markQuotaExhausted(
-        accountId: String,
-        cooldownMs: Long = GEMINI_RETRY_DELAY_CAP_MS,
-    ) = mutex.withLock {
-        val now = System.currentTimeMillis()
-        replaceAccount(accountId) {
-            it.copy(quotaExhaustedUntil = now + cooldownMs)
-        }
     }
 
     suspend fun delete(accountId: String) = mutex.withLock {
@@ -144,11 +128,9 @@ class GeminiAccountRepository internal constructor(
         val account = state.accounts.firstOrNull { it.id == accountId }
             ?: error("Google account not found")
         val fresh = ensureFreshLocked(account, force = true)
-        val uncooled = fresh.copy(quotaExhaustedUntil = 0L)
-        replaceAccount(accountId) { uncooled }
         // Quota is informational, so a backend that will not report it must not turn a perfectly
         // good token refresh into a failure.
-        runCatching { fetchUsageLocked(uncooled) }.getOrDefault(uncooled)
+        runCatching { fetchUsageLocked(fresh) }.getOrDefault(fresh)
     }
 
     suspend fun refreshAll() {
@@ -534,14 +516,11 @@ internal fun readProjectId(element: kotlinx.serialization.json.JsonElement?): St
 internal fun selectGeminiAccountIndex(
     accounts: List<GeminiAccount>,
     startIndex: Int,
-    excludedAccountIds: Set<String> = emptySet(),
-    now: Long = System.currentTimeMillis(),
 ): Int? {
     if (accounts.isEmpty()) return null
     repeat(accounts.size) { offset ->
         val index = (startIndex + offset).mod(accounts.size)
-        val candidate = accounts[index]
-        if (candidate.id !in excludedAccountIds && candidate.isAvailable(now)) return index
+        if (accounts[index].isAvailable()) return index
     }
     return null
 }

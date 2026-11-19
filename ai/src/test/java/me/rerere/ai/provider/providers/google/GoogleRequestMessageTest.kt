@@ -474,13 +474,15 @@ class GoogleRequestMessageTest {
     }
 
     @Test
-    fun `Gemini 3 series models send the canonical lowercase thinkingLevel for each ReasoningLevel`() {
+    fun `Gemini 3 series models send the canonical uppercase thinkingLevel for each ReasoningLevel`() {
+        // The v1beta discovery document and both official SDKs (@google/genai, python-genai)
+        // serialize thinkingLevel as the uppercase proto enum name.
         val expected = mapOf(
-            ReasoningLevel.OFF to "minimal",
-            ReasoningLevel.LOW to "low",
-            ReasoningLevel.MEDIUM to "medium",
-            ReasoningLevel.HIGH to "high",
-            ReasoningLevel.XHIGH to "high",
+            ReasoningLevel.OFF to "MINIMAL",
+            ReasoningLevel.LOW to "LOW",
+            ReasoningLevel.MEDIUM to "MEDIUM",
+            ReasoningLevel.HIGH to "HIGH",
+            ReasoningLevel.XHIGH to "HIGH",
         )
 
         for ((level, thinkingLevel) in expected) {
@@ -505,7 +507,7 @@ class GoogleRequestMessageTest {
     }
 
     @Test
-    fun `AUTO reasoning level omits thinkingLevel for Gemini 3 series models without suffix`() {
+    fun `AUTO reasoning level omits thinkingLevel for Gemini 3 series models`() {
         val messages = listOf(UIMessage.user("hello"))
         val params = TextGenerationParams(
             model = Model(
@@ -519,28 +521,8 @@ class GoogleRequestMessageTest {
         val thinkingConfig = request["generationConfig"]!!.jsonObject["thinkingConfig"]!!.jsonObject
 
         assertTrue(
-            "AUTO must not emit a thinkingLevel key for models without level suffix",
+            "AUTO must not emit a thinkingLevel key",
             !thinkingConfig.containsKey("thinkingLevel")
-        )
-    }
-
-    @Test
-    fun `AUTO reasoning level infers thinkingLevel from suffixed models like gemini-3-8-flash-high`() {
-        val messages = listOf(UIMessage.user("hello"))
-        val params = TextGenerationParams(
-            model = Model(
-                modelId = "gemini-3.8-flash-high",
-                abilities = listOf(ModelAbility.REASONING)
-            ),
-            reasoningLevel = ReasoningLevel.AUTO,
-        )
-
-        val request = invokeBuildCompletionRequestBody(messages, params)
-        val thinkingConfig = request["generationConfig"]!!.jsonObject["thinkingConfig"]!!.jsonObject
-
-        assertEquals(
-            "high",
-            thinkingConfig["thinkingLevel"]?.jsonPrimitive?.content
         )
     }
 
