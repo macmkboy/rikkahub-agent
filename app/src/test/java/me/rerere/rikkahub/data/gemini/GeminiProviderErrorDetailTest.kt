@@ -153,4 +153,49 @@ class GeminiProviderErrorDetailTest {
         assertEquals(429, (tagged as me.rerere.ai.util.HttpException).statusCode)
         assertEquals("raw", tagged.rawBody)
     }
+
+    @Test
+    fun `appendGeminiTrace keeps HttpException status and appends trace`() {
+        val original = me.rerere.ai.util.HttpException("Resource exhausted", statusCode = 429, rawBody = "raw")
+        val traced = appendGeminiTrace(original, "model=m, body=10KB", listOf("a@daily=429"))
+        assertTrue(traced is me.rerere.ai.util.HttpException)
+        assertEquals(429, (traced as me.rerere.ai.util.HttpException).statusCode)
+        assertEquals("raw", traced.rawBody)
+        assertTrue(traced.message.orEmpty().startsWith("Resource exhausted"))
+        assertTrue(traced.message.orEmpty().contains("[trace] model=m, body=10KB"))
+        assertTrue(traced.message.orEmpty().contains("[attempts] a@daily=429"))
+    }
+
+    @Test
+    fun `describeGeminiRequest counts tools system chars and contents`() {
+        val inner = json.parseToJsonElement(
+            """{"systemInstruction":{"parts":[{"text":"${"x".repeat(2500)}"}]},""" +
+                """"contents":[{"role":"user"},{"role":"model"}],""" +
+                """"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}},""" +
+                """"tools":[{"functionDeclarations":[{"name":"a"},{"name":"b"}]},{"googleSearch":{}}]}"""
+        ).jsonObject
+        val trace = describeGeminiRequest("x".repeat(8192), inner, "gemini-3.8-flash")
+        assertTrue(trace, trace.contains("model=gemini-3.8-flash"))
+        assertTrue(trace, trace.contains("body=8KB"))
+        assertTrue(trace, trace.contains("tools=2"))
+        assertTrue(trace, trace.contains("system=2K chars"))
+        assertTrue(trace, trace.contains("contents=2"))
+        assertTrue(trace, trace.contains("thinking=high"))
+    }
+
+    @Test
+    fun `only quota and credential failures trigger account failover`() {
+        assertTrue(shouldFailoverGeminiAccount(429))
+        assertTrue(shouldFailoverGeminiAccount(401))
+        assertTrue(shouldFailoverGeminiAccount(403))
+        assertFalse(shouldFailoverGeminiAccount(400))
+        assertFalse(shouldFailoverGeminiAccount(null))
+    }
+
+    @Test
+    fun `endpoint labels distinguish daily sandbox and prod`() {
+        assertEquals("daily", geminiEndpointLabel(ANTIGRAVITY_DAILY_ENDPOINT))
+        assertEquals("sandbox", geminiEndpointLabel(ANTIGRAVITY_DAILY_SANDBOX_ENDPOINT))
+        assertEquals("prod", geminiEndpointLabel(GeminiAccountRepository.CODE_ASSIST_ENDPOINT))
+    }
 }

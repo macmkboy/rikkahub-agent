@@ -130,32 +130,32 @@ class GeminiProvider(
         val attemptedAccountIds = mutableSetOf<String>()
         val adapter = GeminiStreamChunkAdapter()
         var lastFailure: Throwable? = null
+        val attemptLog = mutableListOf<String>()
+        var requestTrace = ""
 
         accountLoop@ while (true) {
-            val account = runCatching { repository.acquireAccount(attemptedAccountIds) }.getOrNull()
-            if (account == null) {
-                break@accountLoop
-            }
+            val account = runCatching { repository.acquireAccount(attemptedAccountIds) }
+                .onFailure { if (lastFailure == null) lastFailure = it }
+                .getOrNull()
+                ?: break@accountLoop
             attemptedAccountIds.add(account.id)
 
+            val innerRequest = raiseMaxTokensAboveThinkingBudget(
+                raiseThinkingBudgetToClaudeFloor(
+                    stripThinkingConfigForGptOss(
+                        params.model.modelId,
+                        wire.buildCompletionRequestBody(messages, params, CODE_ASSIST_SAFETY_CATEGORIES)
+                    )
+                )
+            )
             val requestBody = buildJsonObject {
                 put("project", account.projectId)
                 put("model", params.model.modelId)
-                put(
-                    "request",
-                    raiseMaxTokensAboveThinkingBudget(
-                        raiseThinkingBudgetToClaudeFloor(
-                            stripThinkingConfigForGptOss(
-                                params.model.modelId,
-                                wire.buildCompletionRequestBody(messages, params, CODE_ASSIST_SAFETY_CATEGORIES)
-                            )
-                        )
-                    )
-                )
+                put("request", innerRequest)
             }
             val requestBodyText = json.encodeToString(requestBody)
-
-            var shouldFailoverAccount = false
+            requestTrace = describeGeminiRequest(requestBodyText, innerRequest, params.model.modelId)
+            Log.i(TAG, "streamText ${accountIdentifier(account)}: $requestTrace")
 
             // Mirrors GEMINI_GENERATE_ENDPOINTS' fallback rule (see its doc comment): every endpoint
             // but the last gets one attempt and hands off to the next on a transient failure; the
@@ -184,6 +184,9 @@ class GeminiProvider(
                         }
 
                         is GeminiStreamAttemptOutcome.Failure -> {
+                            val status = outcome.classification.status
+                            attemptLog += "${accountIdentifier(account)}@${geminiEndpointLabel(endpoint)}=" +
+                                "${status ?: "?"}${outcome.classification.reason?.let { "/$it" } ?: ""}"
                             val taggedCause = tagErrorWithAccount(outcome.cause, account)
                             lastFailure = taggedCause
                             if (outcome.emitted) {
@@ -194,10 +197,17 @@ class GeminiProvider(
                             }
 
                             if (!outcome.classification.retryable) {
-                                val cooldownMs = outcome.classification.retryDelayMs ?: GEMINI_RETRY_DELAY_CAP_MS
-                                launch { repository.markQuotaExhausted(account.id, cooldownMs) }
-                                Log.w(TAG, "Account ${accountIdentifier(account)} hit terminal quota/error (${outcome.classification.reason}); attempting failover to next account")
-                                shouldFailoverAccount = true
+                                if (!shouldFailoverGeminiAccount(status)) {
+                                    // Request-shaped errors (400 etc.) fail identically on every
+                                    // account: surface them now without touching account state.
+                                    close(appendGeminiTrace(taggedCause, requestTrace, attemptLog))
+                                    return@callbackFlow
+                                }
+                                if (status == 429) {
+                                    val cooldownMs = outcome.classification.retryDelayMs ?: GEMINI_RETRY_DELAY_CAP_MS
+                                    launch { repository.markQuotaExhausted(account.id, cooldownMs) }
+                                }
+                                Log.w(TAG, "Account ${accountIdentifier(account)} failed ($status ${outcome.classification.reason}); trying next account")
                                 break@endpointLoop
                             }
 
@@ -209,19 +219,14 @@ class GeminiProvider(
                     }
                 }
             }
-
-            // All fallback endpoints for this account were exhausted without success
-            shouldFailoverAccount = true
-            launch { repository.markQuotaExhausted(account.id, GEMINI_RETRY_DELAY_CAP_MS) }
-            Log.w(TAG, "Account ${accountIdentifier(account)} exhausted all endpoints; attempting failover to next account")
-
-            if (!shouldFailoverAccount) {
-                break@accountLoop
-            }
+            // Every endpoint for this account failed without output: try the next account.
         }
 
-        // Every account attempt was exhausted without a single chunk going out.
-        close(lastFailure ?: IllegalStateException("Cloud Code Assist request failed: all available Google accounts exhausted"))
+        // Every account attempt was exhausted without a single chunk going out. Always surface the
+        // real upstream failure (never a generic message) together with the request trace.
+        val finalCause = lastFailure
+            ?: IllegalStateException("Cloud Code Assist request failed: no usable Google account")
+        close(appendGeminiTrace(finalCause, requestTrace, attemptLog))
         awaitClose { }
     }.buffer(Channel.UNLIMITED)
 
@@ -601,6 +606,63 @@ internal fun tagErrorWithAccount(cause: Throwable, account: GeminiAccount): Thro
         }
         is IllegalStateException -> IllegalStateException(tagged, cause.cause)
         else -> cause
+    }
+}
+
+/**
+ * Only quota (429) and credential (401/403) failures are account-specific; anything else (e.g. a
+ * 400 for a malformed request) fails identically on every account, so failover would only hide it.
+ */
+internal fun shouldFailoverGeminiAccount(status: Int?): Boolean =
+    status == 429 || status == 401 || status == 403
+
+/** Short label for a Code Assist endpoint (`daily`, `sandbox`, `prod`), used in error traces. */
+internal fun geminiEndpointLabel(endpoint: String): String {
+    val host = endpoint.substringAfter("://").substringBefore("/")
+    return when {
+        host.contains("sandbox") -> "sandbox"
+        host.contains("daily") -> "daily"
+        else -> "prod"
+    }
+}
+
+/**
+ * One-line size summary of a Code Assist request, attached to failures so a 429 caused by an
+ * oversized request (too many input tokens per request/minute) can be told apart from a real
+ * per-account quota exhaustion. Tokens are a rough estimate (UTF-8 bytes / 4).
+ */
+internal fun describeGeminiRequest(requestBodyText: String, innerRequest: JsonObject, modelId: String): String {
+    val bytes = requestBodyText.toByteArray(Charsets.UTF_8).size
+    val toolCount = (innerRequest["tools"] as? JsonArray).orEmpty().sumOf { tool ->
+        ((tool as? JsonObject)?.get("functionDeclarations") as? JsonArray)?.size ?: 0
+    }
+    val systemChars = ((innerRequest["systemInstruction"] as? JsonObject)?.get("parts") as? JsonArray)
+        .orEmpty()
+        .sumOf { (it as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull?.length ?: 0 }
+    val contentCount = (innerRequest["contents"] as? JsonArray)?.size ?: 0
+    val thinking = ((innerRequest["generationConfig"] as? JsonObject)?.get("thinkingConfig") as? JsonObject)
+        ?.let { cfg ->
+            cfg["thinkingLevel"]?.jsonPrimitive?.contentOrNull
+                ?: cfg["thinkingBudget"]?.jsonPrimitive?.contentOrNull
+        } ?: "auto"
+    return "model=$modelId, body=${bytes / 1024}KB (~${bytes / 4 / 1000}K tokens est.), " +
+        "tools=$toolCount, system=${systemChars / 1000}K chars, contents=$contentCount, thinking=$thinking"
+}
+
+/** Appends the request trace and per-attempt status log to a failure without losing its type. */
+internal fun appendGeminiTrace(cause: Throwable, requestTrace: String, attempts: List<String>): Throwable {
+    if (requestTrace.isBlank() && attempts.isEmpty()) return cause
+    val trace = buildString {
+        append("\n\n[trace] ")
+        append(requestTrace.ifBlank { "request not built" })
+        if (attempts.isNotEmpty()) append("\n[attempts] ").append(attempts.joinToString(", "))
+    }
+    val message = (cause.message ?: "Unknown error") + trace
+    return when (cause) {
+        is HttpException -> HttpException(message, statusCode = cause.statusCode, rawBody = cause.rawBody)
+            .apply { cause.cause?.let { initCause(it) } }
+        is IllegalStateException -> IllegalStateException(message, cause.cause)
+        else -> IllegalStateException(message, cause)
     }
 }
 

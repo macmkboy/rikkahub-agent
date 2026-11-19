@@ -97,17 +97,22 @@ class GeminiAccountRepository internal constructor(
         now: Long = System.currentTimeMillis(),
     ): GeminiAccount = mutex.withLock {
         if (state.accounts.isEmpty()) error("No Google account is signed in")
-        repeat(state.accounts.size) {
-            val index = selectGeminiAccountIndex(
-                accounts = state.accounts,
-                startIndex = state.nextAccountIndex,
-                excludedAccountIds = excludedAccountIds,
-                now = now,
-            ) ?: return@repeat
-            val candidate = state.accounts[index]
-            updateState(state.copy(nextAccountIndex = (index + 1) % state.accounts.size))
-            val fresh = runCatching { ensureFreshLocked(candidate) }.getOrNull() ?: return@repeat
-            return fresh
+        // Cooldown is a preference, not a hard block: first prefer accounts outside their 429
+        // cooldown, then fall back to any enabled, valid account so a single 429 can never lock
+        // the user out of their only active account.
+        for (selectionNow in listOf(now, Long.MAX_VALUE)) {
+            repeat(state.accounts.size) {
+                val index = selectGeminiAccountIndex(
+                    accounts = state.accounts,
+                    startIndex = state.nextAccountIndex,
+                    excludedAccountIds = excludedAccountIds,
+                    now = selectionNow,
+                ) ?: return@repeat
+                val candidate = state.accounts[index]
+                updateState(state.copy(nextAccountIndex = (index + 1) % state.accounts.size))
+                val fresh = runCatching { ensureFreshLocked(candidate) }.getOrNull() ?: return@repeat
+                return fresh
+            }
         }
         val suffix = if (excludedAccountIds.isNotEmpty()) " (all attempted accounts exhausted or in cooldown)" else ""
         error("No available Google account$suffix")
