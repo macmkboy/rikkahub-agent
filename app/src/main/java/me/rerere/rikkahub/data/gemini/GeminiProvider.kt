@@ -596,8 +596,9 @@ internal fun tagErrorWithAccount(cause: Throwable, account: GeminiAccount): Thro
             tagged,
             statusCode = cause.statusCode,
             rawBody = cause.rawBody,
-            cause = cause.cause,
-        )
+        ).apply {
+            cause.cause?.let { initCause(it) }
+        }
         is IllegalStateException -> IllegalStateException(tagged, cause.cause)
         else -> cause
     }
