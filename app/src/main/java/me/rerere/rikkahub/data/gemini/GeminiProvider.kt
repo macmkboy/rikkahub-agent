@@ -193,15 +193,10 @@ class GeminiProvider(
                                 return@callbackFlow
                             }
 
-                            val isTerminalQuota = outcome.classification.status == 429 ||
-                                outcome.classification.reason == "QUOTA_EXHAUSTED" ||
-                                outcome.classification.reason == "RESOURCE_EXHAUSTED" ||
-                                !outcome.classification.retryable
-
-                            if (isTerminalQuota) {
+                            if (!outcome.classification.retryable) {
                                 val cooldownMs = outcome.classification.retryDelayMs ?: GEMINI_RETRY_DELAY_CAP_MS
                                 launch { repository.markQuotaExhausted(account.id, cooldownMs) }
-                                Log.w(TAG, "Account ${accountIdentifier(account)} exhausted quota or hit terminal error; attempting failover to next account")
+                                Log.w(TAG, "Account ${accountIdentifier(account)} hit terminal quota/error (${outcome.classification.reason}); attempting failover to next account")
                                 shouldFailoverAccount = true
                                 break@endpointLoop
                             }
@@ -214,6 +209,11 @@ class GeminiProvider(
                     }
                 }
             }
+
+            // All fallback endpoints for this account were exhausted without success
+            shouldFailoverAccount = true
+            launch { repository.markQuotaExhausted(account.id, GEMINI_RETRY_DELAY_CAP_MS) }
+            Log.w(TAG, "Account ${accountIdentifier(account)} exhausted all endpoints; attempting failover to next account")
 
             if (!shouldFailoverAccount) {
                 break@accountLoop
