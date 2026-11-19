@@ -74,19 +74,33 @@ class GeminiProvider(
     override suspend fun listModels(
         providerSetting: ProviderSetting.GeminiOAuth,
     ): List<Model> = withContext(Dispatchers.IO) {
-        val account = repository.acquireAccount()
-        val outcome = client.postWithEndpointFallback(GEMINI_GENERATE_ENDPOINTS, json) { endpoint ->
-            Request.Builder()
-                .url("$endpoint/v1internal:fetchAvailableModels")
-                .antigravityHeaders(account.accessToken)
-                .post("{}".toRequestBody(JSON_MEDIA_TYPE))
-                .build()
+        val attemptedAccountIds = mutableSetOf<String>()
+        var lastFailure: Throwable? = null
+
+        while (true) {
+            val account = runCatching { repository.acquireAccount(attemptedAccountIds) }.getOrNull()
+                ?: break
+            attemptedAccountIds.add(account.id)
+
+            val outcome = client.postWithEndpointFallback(GEMINI_GENERATE_ENDPOINTS, json) { endpoint ->
+                Request.Builder()
+                    .url("$endpoint/v1internal:fetchAvailableModels")
+                    .antigravityHeaders(account.accessToken)
+                    .post("{}".toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
+            }
+            if (outcome.successful) {
+                return@withContext mapAvailableModels(outcome.body, json)
+            }
+            val id = accountIdentifier(account)
+            if (outcome.code == 401) {
+                repository.markInvalid(account.id)
+            } else if (outcome.code == 429) {
+                repository.markQuotaExhausted(account.id)
+            }
+            lastFailure = IllegalStateException("Failed to list Gemini models [$id]: ${outcome.code} ${outcome.body}")
         }
-        if (!outcome.successful) {
-            if (outcome.code == 401) repository.markInvalid(account.id)
-            error("Failed to list Gemini models: ${outcome.code} ${outcome.body}")
-        }
-        mapAvailableModels(outcome.body, json)
+        throw lastFailure ?: IllegalStateException("No available Google account to list models")
     }
 
     override suspend fun generateText(
@@ -113,72 +127,101 @@ class GeminiProvider(
         messages: List<UIMessage>,
         params: TextGenerationParams,
     ): Flow<StreamChunk> = callbackFlow {
-        val account = repository.acquireAccount()
-        val requestBody = buildJsonObject {
-            put("project", account.projectId)
-            put("model", params.model.modelId)
-            put(
-                "request",
-                raiseMaxTokensAboveThinkingBudget(
-                    raiseThinkingBudgetToClaudeFloor(
-                        stripThinkingConfigForGptOss(
-                            params.model.modelId,
-                            wire.buildCompletionRequestBody(messages, params, CODE_ASSIST_SAFETY_CATEGORIES)
-                        )
-                    )
-                )
-            )
-        }
-        val requestBodyText = json.encodeToString(requestBody)
+        val attemptedAccountIds = mutableSetOf<String>()
         val adapter = GeminiStreamChunkAdapter()
         var lastFailure: Throwable? = null
 
-        // Mirrors GEMINI_GENERATE_ENDPOINTS' fallback rule (see its doc comment): every endpoint
-        // but the last gets one attempt and hands off to the next on a transient failure; the
-        // last endpoint gets GEMINI_MAX_RETRIES extra attempts with backoff. A retry - whether the
-        // next endpoint or another attempt on this one - only ever happens before any chunk has
-        // been sent downstream, so a partial reply is never duplicated.
-        endpointLoop@ for (index in GEMINI_GENERATE_ENDPOINTS.indices) {
-            val endpoint = GEMINI_GENERATE_ENDPOINTS[index]
-            val isLastEndpoint = index == GEMINI_GENERATE_ENDPOINTS.lastIndex
-            val maxAttempts = if (isLastEndpoint) GEMINI_MAX_RETRIES + 1 else 1
-            for (attempt in 0 until maxAttempts) {
-                val request = Request.Builder()
-                    .url("$endpoint/v1internal:streamGenerateContent?alt=sse")
-                    .headers(params.customHeaders.toHeaders())
-                    .antigravityHeaders(account.accessToken)
-                    .addHeader("Content-Type", "application/json")
-                    .addHeader("Accept", "text/event-stream")
-                    .post(requestBodyText.toRequestBody(JSON_MEDIA_TYPE))
-                    .build()
+        accountLoop@ while (true) {
+            val account = runCatching { repository.acquireAccount(attemptedAccountIds) }.getOrNull()
+            if (account == null) {
+                break@accountLoop
+            }
+            attemptedAccountIds.add(account.id)
 
-                when (val outcome = runStreamAttempt(request, adapter, account, params)) {
-                    is GeminiStreamAttemptOutcome.Success -> {
-                        trySend(adapter.finish())
-                        close()
-                        break@endpointLoop
-                    }
+            val requestBody = buildJsonObject {
+                put("project", account.projectId)
+                put("model", params.model.modelId)
+                put(
+                    "request",
+                    raiseMaxTokensAboveThinkingBudget(
+                        raiseThinkingBudgetToClaudeFloor(
+                            stripThinkingConfigForGptOss(
+                                params.model.modelId,
+                                wire.buildCompletionRequestBody(messages, params, CODE_ASSIST_SAFETY_CATEGORIES)
+                            )
+                        )
+                    )
+                )
+            }
+            val requestBodyText = json.encodeToString(requestBody)
 
-                    is GeminiStreamAttemptOutcome.Failure -> {
-                        lastFailure = outcome.cause
-                        if (outcome.emitted || !outcome.classification.retryable) {
-                            close(outcome.cause)
-                            break@endpointLoop
+            var shouldFailoverAccount = false
+
+            // Mirrors GEMINI_GENERATE_ENDPOINTS' fallback rule (see its doc comment): every endpoint
+            // but the last gets one attempt and hands off to the next on a transient failure; the
+            // last endpoint gets GEMINI_MAX_RETRIES extra attempts with backoff. A retry - whether the
+            // next endpoint or another attempt on this one - only ever happens before any chunk has
+            // been sent downstream, so a partial reply is never duplicated.
+            endpointLoop@ for (index in GEMINI_GENERATE_ENDPOINTS.indices) {
+                val endpoint = GEMINI_GENERATE_ENDPOINTS[index]
+                val isLastEndpoint = index == GEMINI_GENERATE_ENDPOINTS.lastIndex
+                val maxAttempts = if (isLastEndpoint) GEMINI_MAX_RETRIES + 1 else 1
+                for (attempt in 0 until maxAttempts) {
+                    val request = Request.Builder()
+                        .url("$endpoint/v1internal:streamGenerateContent?alt=sse")
+                        .headers(params.customHeaders.toHeaders())
+                        .antigravityHeaders(account.accessToken)
+                        .addHeader("Content-Type", "application/json")
+                        .addHeader("Accept", "text/event-stream")
+                        .post(requestBodyText.toRequestBody(JSON_MEDIA_TYPE))
+                        .build()
+
+                    when (val outcome = runStreamAttempt(request, adapter, account, params)) {
+                        is GeminiStreamAttemptOutcome.Success -> {
+                            trySend(adapter.finish())
+                            close()
+                            return@callbackFlow
                         }
-                        if (attempt < maxAttempts - 1) {
-                            delay(resolveGeminiRetryDelayMs(outcome.classification, attempt))
+
+                        is GeminiStreamAttemptOutcome.Failure -> {
+                            val taggedCause = tagErrorWithAccount(outcome.cause, account)
+                            lastFailure = taggedCause
+                            if (outcome.emitted) {
+                                // Once tokens have gone downstream, failing over to another account
+                                // would corrupt the stream with a duplicate prefix.
+                                close(taggedCause)
+                                return@callbackFlow
+                            }
+
+                            val isTerminalQuota = outcome.classification.status == 429 ||
+                                outcome.classification.reason == "QUOTA_EXHAUSTED" ||
+                                outcome.classification.reason == "RESOURCE_EXHAUSTED" ||
+                                !outcome.classification.retryable
+
+                            if (isTerminalQuota) {
+                                val cooldownMs = outcome.classification.retryDelayMs ?: GEMINI_RETRY_DELAY_CAP_MS
+                                launch { repository.markQuotaExhausted(account.id, cooldownMs) }
+                                Log.w(TAG, "Account ${accountIdentifier(account)} exhausted quota or hit terminal error; attempting failover to next account")
+                                shouldFailoverAccount = true
+                                break@endpointLoop
+                            }
+
+                            if (attempt < maxAttempts - 1) {
+                                delay(resolveGeminiRetryDelayMs(outcome.classification, attempt))
+                            }
+                            // Otherwise this endpoint is exhausted; fall through to the next one.
                         }
-                        // Otherwise this endpoint is exhausted; fall through to the next one.
                     }
                 }
             }
+
+            if (!shouldFailoverAccount) {
+                break@accountLoop
+            }
         }
-        // Every branch above already closed the channel except the one where every endpoint and
-        // every retry was exhausted without a single chunk ever going out; close() is idempotent,
-        // so this is a no-op on every other path.
-        close(lastFailure ?: IllegalStateException("Cloud Code Assist request failed"))
-        // trySend silently drops a delta when the buffer is full, dropping characters mid-reply
-        // (#1295), so the buffer must be unbounded - same as the other providers' streamText.
+
+        // Every account attempt was exhausted without a single chunk going out.
+        close(lastFailure ?: IllegalStateException("Cloud Code Assist request failed: all available Google accounts exhausted"))
         awaitClose { }
     }.buffer(Channel.UNLIMITED)
 
@@ -537,6 +580,26 @@ private fun resolveStreamFailureCause(
         // for exactly that reason (e.g. ChatService.kt) rather than android.util.Log.
         Logging.log(TAG, "onFailure: failed to read error body, detail lost: ${e.javaClass.simpleName}: ${e.message}")
         t ?: e
+    }
+}
+
+internal fun accountIdentifier(account: GeminiAccount): String =
+    account.email.ifBlank { account.name.ifBlank { account.projectId.ifBlank { account.id } } }
+
+internal fun tagErrorWithAccount(cause: Throwable, account: GeminiAccount): Throwable {
+    val id = accountIdentifier(account)
+    val orig = cause.message ?: "Unknown error"
+    if (orig.contains("[$id]")) return cause
+    val tagged = "[$id] $orig"
+    return when (cause) {
+        is HttpException -> HttpException(
+            tagged,
+            statusCode = cause.statusCode,
+            rawBody = cause.rawBody,
+            cause = cause.cause,
+        )
+        is IllegalStateException -> IllegalStateException(tagged, cause.cause)
+        else -> cause
     }
 }
 

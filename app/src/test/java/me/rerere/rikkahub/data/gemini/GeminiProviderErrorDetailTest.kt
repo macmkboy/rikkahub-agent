@@ -134,4 +134,23 @@ class GeminiProviderErrorDetailTest {
         assertTrue(exception.message.orEmpty().contains("RESOURCE_EXHAUSTED"))
         assertFalse(classification.retryable)
     }
+
+    @Test
+    fun `tagErrorWithAccount prefixes account email to HttpException message`() {
+        val account = GeminiAccount(
+            id = "id-1",
+            name = "Test User",
+            email = "user@example.com",
+            projectId = "proj-1",
+            accessToken = "tok",
+            refreshToken = "ref",
+            expiresAt = Long.MAX_VALUE,
+        )
+        val original = me.rerere.ai.util.HttpException("Resource exhausted", statusCode = 429, rawBody = "raw")
+        val tagged = tagErrorWithAccount(original, account)
+        assertEquals("[user@example.com] Resource exhausted", tagged.message)
+        assertTrue(tagged is me.rerere.ai.util.HttpException)
+        assertEquals(429, (tagged as me.rerere.ai.util.HttpException).statusCode)
+        assertEquals("raw", tagged.rawBody)
+    }
 }

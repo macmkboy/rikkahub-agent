@@ -87,6 +87,33 @@ class GeminiAccountTest {
     }
 
     @Test
+    fun `selection skips accounts in quota cooldown`() {
+        val now = 100_000L
+        val accounts = listOf(
+            account("a").copy(quotaExhaustedUntil = now + 60_000L),
+            account("b"),
+        )
+        assertEquals(1, selectGeminiAccountIndex(accounts, startIndex = 0, now = now))
+    }
+
+    @Test
+    fun `selection allows cooled down accounts after cooldown expires`() {
+        val now = 100_000L
+        val accounts = listOf(
+            account("a").copy(quotaExhaustedUntil = now - 1000L),
+            account("b"),
+        )
+        assertEquals(0, selectGeminiAccountIndex(accounts, startIndex = 0, now = now))
+    }
+
+    @Test
+    fun `selection skips excluded account IDs`() {
+        val accounts = listOf(account("a"), account("b"), account("c"))
+        assertEquals(1, selectGeminiAccountIndex(accounts, startIndex = 0, excludedAccountIds = setOf("a")))
+        assertEquals(2, selectGeminiAccountIndex(accounts, startIndex = 0, excludedAccountIds = setOf("a", "b")))
+    }
+
+    @Test
     fun `a 401 is an authentication failure`() {
         assertTrue(isGeminiRefreshAuthenticationFailure(401, "", json))
     }
