@@ -23,6 +23,7 @@ import me.rerere.rikkahub.data.db.entity.ConversationCompactionEntity
 import me.rerere.rikkahub.data.db.entity.MessageNodeEntity
 import me.rerere.rikkahub.data.db.fts.MessageFtsManager
 import me.rerere.rikkahub.data.db.fts.MessageSearchSort
+import me.rerere.rikkahub.data.favorite.NodeFavoriteAdapter
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.ConversationCompaction
@@ -372,13 +373,26 @@ class ConversationRepository(
         conversation: Conversation,
         updateSearchIndex: Boolean = true,
     ) {
+        val conversationId = conversation.id.toString()
         database.withTransaction {
             conversationDAO.update(
                 conversationToConversationEntity(conversation)
             )
             // 删除旧的节点，插入新的节点
-            messageNodeDAO.deleteByConversation(conversation.id.toString())
-            saveMessageNodes(conversation.id.toString(), conversation.messageNodes)
+            messageNodeDAO.deleteByConversation(conversationId)
+            saveMessageNodes(conversationId, conversation.messageNodes)
+            // 同步清理被移除节点对应的收藏
+            val favoriteNodeIds = favoriteDAO.getFavoriteNodeIdsOfConversation(conversationId)
+            if (favoriteNodeIds.isNotEmpty()) {
+                val currentNodeIds = conversation.messageNodes.mapTo(HashSet()) { it.id.toString() }
+                val removedNodeIds = favoriteNodeIds.filterNot { it in currentNodeIds }
+                if (removedNodeIds.isNotEmpty()) {
+                    removedNodeIds
+                        .map { NodeFavoriteAdapter.buildRefKey(conversationId, it) }
+                        .chunked(500)
+                        .forEach { favoriteDAO.deleteByRefKeys(it) }
+                }
+            }
         }
         if (updateSearchIndex) {
             messageFtsManager.indexConversation(conversation)
@@ -421,7 +435,10 @@ class ConversationRepository(
         } else {
             conversation
         }
+        val conversationId = conversation.id.toString()
         database.withTransaction {
+            // 收藏表和会话没有外键，要单独删
+            favoriteDAO.deleteNodeFavoritesOfConversation(conversationId)
             // message_node 会通过 CASCADE 自动删除
             conversationDAO.delete(
                 conversationToConversationEntity(conversation)
@@ -431,7 +448,7 @@ class ConversationRepository(
         // authoritative delete has committed, so a failed/rolled-back transaction can't
         // leave the conversation still present but unsearchable (matches insert/update,
         // which already index only after their transaction completes).
-        messageFtsManager.deleteConversation(conversation.id.toString())
+        messageFtsManager.deleteConversation(conversationId)
         filesManager.deleteChatFiles(fullConversation.files)
     }
 

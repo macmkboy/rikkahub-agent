@@ -73,6 +73,14 @@ fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
                 currentThinkingSteps.add(ThinkingStep.ServerToolStep(part))
             }
 
+            is UIMessagePart.Text -> {
+                // 只承载 thoughtSignature 等元数据的空文本不显示，也不打断思考块
+                if (part.text.isNotEmpty()) {
+                    flushThinkingSteps()
+                    result.add(MessagePartBlock.ContentBlock(part, index))
+                }
+            }
+
             else -> {
                 flushThinkingSteps()
                 result.add(MessagePartBlock.ContentBlock(part, index))

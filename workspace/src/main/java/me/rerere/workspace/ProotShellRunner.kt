@@ -1,6 +1,7 @@
 package me.rerere.workspace
 
 import java.io.File
+import java.util.UUID
 
 data class WorkspaceBindMount(
     val source: File,
@@ -43,9 +44,16 @@ class ProotShellRunner(
 
         context.tempDir.mkdirs()
         patcher.patch(context.linuxDir)
-        val process = newProcessBuilder(context, proot, loader).start()
+        val pidFile = File(context.linuxDir, "${EXEC_DIR.trimStart('/')}/${UUID.randomUUID()}.pid")
+        pidFile.parentFile?.mkdirs()
+        val process = newProcessBuilder(context, proot, loader, "$EXEC_DIR/${pidFile.name}").start()
 
-        return process.readResult(context.timeoutMillis, context.stdin)
+        return try {
+            // 超时或取消时直接结束, 不留宽限期: 调用方已经不再等这条命令
+            process.readResult(context.timeoutMillis, context.stdin) { terminateProot(this, pidFile) }
+        } finally {
+            pidFile.delete()
+        }
     }
 
     override fun start(context: WorkspaceShellContext): Process {
@@ -71,8 +79,9 @@ class ProotShellRunner(
         context: WorkspaceShellContext,
         proot: File,
         loader: File,
+        pidFilePath: String? = null,
     ): ProcessBuilder =
-        ProcessBuilder(buildCommand(context, proot))
+        ProcessBuilder(buildCommand(context, proot, pidFilePath))
             .directory(context.filesDir)
             .redirectErrorStream(false)
             .apply {
@@ -89,6 +98,7 @@ class ProotShellRunner(
     private fun buildCommand(
         context: WorkspaceShellContext,
         proot: File,
+        pidFilePath: String? = null,
     ): List<String> {
         val command = mutableListOf(
             proot.absolutePath,
@@ -132,12 +142,14 @@ class ProotShellRunner(
             "/bin/bash",
             "-l",
             "-c",
-            // 命令通过位置参数传入, 避免任何转义; eval "$2" 对命令文本只求值一次, 等价于 bash -c "$cmd"
-            "cd -- \"\$1\" && eval \"\$2\"",
+            if (pidFilePath != null) TRACKED_SCRIPT else EXEC_SCRIPT,
             "rikkahub",
             context.prootCwd(),
             context.command,
         )
+        if (pidFilePath != null) {
+            command += pidFilePath
+        }
         return command
     }
 
@@ -157,5 +169,14 @@ class ProotShellRunner(
         private const val PROOT_EXEC = "libproot_exec.so"
         private const val PROOT_LOADER = "libproot_loader.so"
         private val WORKSPACE_DIR = WorkspaceManager.ROOTFS_WORKSPACE_DIR
+
+        // 命令通过位置参数传入, 避免任何转义; eval "$2" 对命令文本只求值一次, 等价于 bash -c "$cmd"
+        private const val EXEC_SCRIPT = "cd -- \"\$1\" && eval \"\$2\""
+
+        // 先把 shell 与 PRoot 的进程号写入 $3, 终止时据此给整组进程发信号, 见 terminateProot
+        private const val TRACKED_SCRIPT = "echo \"\$\$ \$PPID\" > \"\$3\"; $EXEC_SCRIPT"
+
+        /** Rootfs 内存放前台命令进程号的目录 */
+        private const val EXEC_DIR = "/tmp/rikkahub/exec"
     }
 }

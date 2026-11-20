@@ -41,6 +41,7 @@ import me.rerere.ai.util.json
 import me.rerere.ai.util.mergeCustomBody
 import me.rerere.ai.util.mergeCustomHeaders
 import me.rerere.ai.util.toHeaders
+import me.rerere.common.android.Logging
 import me.rerere.common.http.await
 import me.rerere.common.http.getByKey
 import okhttp3.MultipartBody
@@ -325,7 +326,9 @@ class OpenAIProvider(
                 .mergeCustomBody(params.customBody)
         )
 
-        Log.i(TAG, "generateImage: $requestBody")
+        if (Logging.isDebugLoggingEnabled()) {
+            Log.i(TAG, "generateImage: $requestBody")
+        }
 
         val request = Request.Builder()
             .url("${providerSetting.baseUrl}/images/generations")
