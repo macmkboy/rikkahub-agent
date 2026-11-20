@@ -48,6 +48,7 @@ fun TTSProviderConfigure(
                     is TTSProviderSetting.Step -> "Step"
                     is TTSProviderSetting.ElevenLabs -> "ElevenLabs"
                     is TTSProviderSetting.FishAudio -> "Fish Audio"
+                    is TTSProviderSetting.DeepSeek -> "DeepSeek"
                 },
                 options = providers,
                 readOnly = true,
@@ -65,6 +66,7 @@ fun TTSProviderConfigure(
                         TTSProviderSetting.ElevenLabs::class -> "ElevenLabs"
                         TTSProviderSetting.FishAudio::class -> "Fish Audio"
                         TTSProviderSetting.Step::class -> "Step"
+                        TTSProviderSetting.DeepSeek::class -> "DeepSeek"
                         else -> providerClass.simpleName ?: "Unknown"
                     }
                 },
@@ -125,6 +127,11 @@ fun TTSProviderConfigure(
                             name = "Step TTS"
                         )
 
+                        TTSProviderSetting.DeepSeek::class -> TTSProviderSetting.DeepSeek(
+                            id = setting.id,
+                            name = "DeepSeek TTS"
+                        )
+
                         else -> setting
                     }
                     onValueChange(newSetting)
@@ -160,6 +167,7 @@ fun TTSProviderConfigure(
             is TTSProviderSetting.ElevenLabs -> ElevenLabsTTSConfiguration(setting, onValueChange)
             is TTSProviderSetting.FishAudio -> FishAudioTTSConfiguration(setting, onValueChange)
             is TTSProviderSetting.Step -> StepTTSConfiguration(setting, onValueChange)
+            is TTSProviderSetting.DeepSeek -> DeepSeekTTSConfiguration(setting, onValueChange)
         }
     }
 }
@@ -1247,6 +1255,56 @@ private fun StepTTSConfiguration(
             placeholder = { Text("例如: 语气温柔, 语速偏慢") },
             minLines = 2,
             maxLines = 4,
+        )
+    }
+}
+
+@Composable
+private fun DeepSeekTTSConfiguration(
+    setting: TTSProviderSetting.DeepSeek,
+    onValueChange: (TTSProviderSetting) -> Unit
+) {
+    FormItem(
+        label = { Text(stringResource(R.string.setting_tts_page_api_key)) },
+        description = { Text("DeepSeek 开放平台的 API Key") }
+    ) {
+        OutlinedTextField(
+            value = setting.apiKey,
+            onValueChange = { onValueChange(setting.copy(apiKey = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("sk-...") },
+            singleLine = true,
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_tts_page_base_url)) },
+        description = { Text("请求地址为 {Base URL}/v1/tools/tts") }
+    ) {
+        OutlinedTextField(
+            value = setting.baseUrl,
+            onValueChange = { onValueChange(setting.copy(baseUrl = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("https://api.deepseek.com") },
+            singleLine = true,
+        )
+    }
+
+    val voices = listOf(
+        "stella" to "Stella（女声）",
+        "tide" to "Tide（男声）",
+    )
+    FormItem(
+        label = { Text(stringResource(R.string.setting_tts_page_voice)) },
+        description = { Text("语种根据文本自动识别，不支持调节语速") }
+    ) {
+        SelectTextField(
+            value = setting.voiceId,
+            options = voices,
+            onValueChange = { onValueChange(setting.copy(voiceId = it)) },
+            onOptionSelected = { (voiceId, _) -> onValueChange(setting.copy(voiceId = voiceId)) },
+            optionToString = { (_, label) -> label },
+            modifier = Modifier.fillMaxWidth()
         )
     }
 }

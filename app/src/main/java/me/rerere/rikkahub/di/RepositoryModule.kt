@@ -65,6 +65,7 @@ val repositoryModule = module {
                 WorkspaceBindMount(
                     source = File(context.filesDir, FileFolders.SKILLS).apply { mkdirs() },
                     target = "/skills",
+                    writable = true,
                 ),
                 WorkspaceBindMount(
                     source = File(context.filesDir, FileFolders.BUILTIN_SKILLS).apply { mkdirs() },

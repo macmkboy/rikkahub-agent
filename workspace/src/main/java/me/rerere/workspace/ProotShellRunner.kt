@@ -6,6 +6,8 @@ import java.util.UUID
 data class WorkspaceBindMount(
     val source: File,
     val target: String,
+    /** AI 写入该挂载点时是否免强制审批 */
+    val writable: Boolean = false,
 ) {
     init {
         require(target.startsWith("/")) { "Bind mount target must be absolute: $target" }

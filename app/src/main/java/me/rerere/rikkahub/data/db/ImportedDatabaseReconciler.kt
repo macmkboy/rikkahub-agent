@@ -61,7 +61,7 @@ object ImportedDatabaseReconciler {
      * newer *shared* conversation columns were added) or this reconciliation will silently stop
      * matching. `internal` so a JVM test can assert these stay in sync with the schema export.
      */
-    internal const val EXPECTED_VERSION = 33
+    internal const val EXPECTED_VERSION = 34
     internal const val EXPECTED_IDENTITY_HASH = "61a9c9769b0c9f68743007339a58e420"
 
     /**
@@ -85,6 +85,9 @@ object ImportedDatabaseReconciler {
      */
     private const val SHELL_COMPATIBILITY_MODE_DDL =
         "ALTER TABLE `workspaces` ADD COLUMN `shell_compatibility_mode` INTEGER NOT NULL DEFAULT 0"
+
+    private const val STORAGE_MOUNTS_DDL =
+        "ALTER TABLE `workspaces` ADD COLUMN `storage_mounts` TEXT NOT NULL DEFAULT '[]'"
 
     /**
      * Fork-only tables absent from an upstream backup, with their exact v25 create + index
@@ -123,6 +126,7 @@ object ImportedDatabaseReconciler {
         "CREATE INDEX IF NOT EXISTS `index_scheduled_jobs_enabled` ON `scheduled_jobs` (`enabled`)",
         "CREATE INDEX IF NOT EXISTS `index_scheduled_job_runs_jobId_startedAtMs` ON `scheduled_job_runs` (`jobId`, `startedAtMs`)",
         "CREATE INDEX IF NOT EXISTS `index_scheduled_job_runs_jobId_outcome` ON `scheduled_job_runs` (`jobId`, `outcome`)",
+        "CREATE INDEX IF NOT EXISTS `index_message_node_conversation_id_node_index` ON `message_node` (`conversation_id`, `node_index`)",
     )
 
     /**
@@ -190,6 +194,12 @@ object ImportedDatabaseReconciler {
                         ) {
                             db.execSQL(SHELL_COMPATIBILITY_MODE_DDL)
                         }
+                        if (tableExists(db, "workspaces") &&
+                            !hasColumn(db, "workspaces", "storage_mounts")
+                        ) {
+                            db.execSQL(STORAGE_MOUNTS_DDL)
+                        }
+                        db.execSQL("DROP INDEX IF EXISTS `index_message_node_conversation_id`")
                         // No migration should run: the file is either already stamped at the
                         // fork's version, or it is an upstream file whose shared schema already
                         // matches it. Point Room's identity row and user_version at the fork so

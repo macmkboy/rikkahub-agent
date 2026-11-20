@@ -123,6 +123,19 @@ android {
             useLegacyPackaging = true
             pickFirsts += "lib/*/libtermux.so"
         }
+        resources {
+            excludes += setOf(
+                "DebugProbesKt.bin",
+                "META-INF/*.kotlin_module",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+                "META-INF/*.version",
+                "META-INF/proguard/*",
+                "kotlin-tooling-metadata.json",
+            )
+        }
     }
     lint {
         disable.add("FullBackupContent")

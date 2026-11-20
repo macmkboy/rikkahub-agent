@@ -80,7 +80,7 @@ fun WorkspaceTerminalPage(id: String) {
 
     val shellCompatibilityMode = state.workspace?.shellCompatibilityMode ?: false
     LaunchedEffect(root, shellCompatibilityMode) {
-        root?.let { sessionManager.ensureSession(it, shellCompatibilityMode) }
+        root?.let { sessionManager.ensureSession(id, it, shellCompatibilityMode) }
     }
 
     RikkahubTheme(colorMode = ColorMode.DARK) {
@@ -89,7 +89,7 @@ fun WorkspaceTerminalPage(id: String) {
                 root = root,
                 state = terminalState,
                 contentPadding = innerPadding,
-                onCreateTab = { root?.let { sessionManager.createTab(it, shellCompatibilityMode) } },
+                onCreateTab = { root?.let { sessionManager.createTab(id, it, shellCompatibilityMode) } },
                 onSelectTab = { tabId ->
                     root?.let { sessionManager.selectTab(it, tabId) }
                 },
@@ -268,6 +268,7 @@ private fun WorkspaceTerminalContent(
                             state.readiness == WorkspaceTerminalReadiness.NotInstalled -> {
                                 stringResource(R.string.workspace_terminal_not_installed)
                             }
+                            state.errorMessage != null -> state.errorMessage
                             else -> stringResource(R.string.workspace_terminal_no_tabs)
                         },
                         style = MaterialTheme.typography.bodyLarge,

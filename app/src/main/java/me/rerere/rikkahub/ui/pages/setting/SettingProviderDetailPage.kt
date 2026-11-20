@@ -72,6 +72,7 @@ import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -102,8 +103,10 @@ import me.rerere.ai.provider.isAuthenticDecisionModel
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.provider.filterByKeywords
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.UIMessage
+import me.rerere.hugeicons.stroke.Refresh01
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.ai.ModelAbilityTag
 import me.rerere.rikkahub.ui.components.ai.ModelModalityTag
@@ -433,25 +436,28 @@ private fun ModelList(
 ) {
     val providerManager = koinInject<ProviderManager>()
     val toaster = LocalToaster.current
-    val modelList by produceState(emptyList(), providerSetting) {
-        runCatching {
-            value = providerManager.getProviderByType(providerSetting)
-                .listModels(providerSetting)
+    // 增删、排序已添加的模型不影响远端列表，去掉 models 再作为 key，避免每次编辑都重新请求
+    val listKey = remember(providerSetting) { providerSetting.copyProvider(models = emptyList()) }
+    var refreshCount by remember { mutableIntStateOf(0) }
+    val remoteModels by produceState(RemoteModels(), listKey, refreshCount) {
+        value = value.copy(loading = true, error = null)
+        value = try {
+            val models = providerManager.getProviderByType(listKey)
+                .listModels(listKey)
                 .sortedBy { it.modelId }
-                .toList()
-        }.onFailure { error ->
-            // runCatching catches Throwable, which includes CancellationException
-            // (e.g. when the user navigates away from the Models tab mid-fetch
-            // and Compose cancels this produceState's coroutine). Re-throw so
-            // we don't print a stack trace + show a toast for normal teardown.
-            if (error is kotlinx.coroutines.CancellationException) throw error
-            error.printStackTrace()
+            RemoteModels(models = models)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            e.printStackTrace()
             // Surface real failures (missing/invalid API key, providers like
             // Minimax that return an HTTP 200 error envelope instead of a 4xx).
             toaster.show(
-                error.message ?: "Failed to load models",
+                e.message ?: "Failed to load models",
                 type = ToastType.Error
             )
+            // 失败时保留上次拿到的列表
+            value.copy(loading = false, error = e)
         }
     }
     var expanded by rememberSaveable { mutableStateOf(true) }
@@ -534,7 +540,8 @@ private fun ModelList(
                 .offset(y = -ScreenOffset),
         ) {
             AddModelButton(
-                models = modelList,
+                remoteModels = remoteModels,
+                onRefresh = { refreshCount++ },
                 selectedModels = providerSetting.models,
                 onAddModel = {
                     onUpdateProvider(providerSetting.addModel(it))
@@ -739,9 +746,17 @@ private fun ModelSettingsForm(
     }
 }
 
+/** 提供商远端的可用模型列表，[error] 不为空时 [models] 是上次成功拿到的结果 */
+private data class RemoteModels(
+    val models: List<Model> = emptyList(),
+    val loading: Boolean = false,
+    val error: Throwable? = null,
+)
+
 @Composable
 private fun AddModelButton(
-    models: List<Model>,
+    remoteModels: RemoteModels,
+    onRefresh: () -> Unit,
     selectedModels: List<Model>,
     expanded: Boolean,
     onAddModel: (Model) -> Unit,
@@ -759,7 +774,8 @@ private fun AddModelButton(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ModelPicker(
-            models = models,
+            remoteModels = remoteModels,
+            onRefresh = onRefresh,
             selectedModels = selectedModels,
             onModelSelected = { model ->
                 onAddModel(model.enrichCapabilities())
@@ -889,7 +905,8 @@ private fun AddModelButton(
 
 @Composable
 private fun ModelPicker(
-    models: List<Model>,
+    remoteModels: RemoteModels,
+    onRefresh: () -> Unit,
     selectedModels: List<Model>,
     onModelSelected: (Model) -> Unit,
     onModelDeselected: (Model) -> Unit,
@@ -903,17 +920,7 @@ private fun ModelPicker(
             sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)),
         ) {
             var filterText by remember { mutableStateOf("") }
-            val filterKeywords = filterText.split(" ").filter { it.isNotBlank() }
-            val filteredModels = models.fastFilter {
-                if (filterKeywords.isEmpty()) {
-                    true
-                } else {
-                    filterKeywords.all { keyword ->
-                        it.modelId.contains(keyword, ignoreCase = true) ||
-                            it.displayName.contains(keyword, ignoreCase = true)
-                    }
-                }
-            }
+            val filteredModels = remoteModels.models.filterByKeywords(filterText)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -932,8 +939,16 @@ private fun ModelPicker(
                 ) {
                     Text(
                         text = stringResource(R.string.setting_provider_page_avaliable_models),
-                        style = MaterialTheme.typography.titleMedium
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
                     )
+
+                    IconButton(
+                        onClick = onRefresh,
+                        enabled = !remoteModels.loading,
+                    ) {
+                        Icon(HugeIcons.Refresh01, contentDescription = "Refresh")
+                    }
 
                     val unselectedCount = filteredModels.count { model ->
                         selectedModels.none { it.modelId == model.modelId }
@@ -953,6 +968,33 @@ private fun ModelPicker(
                                 R.string.setting_provider_page_select_all,
                                 unselectedCount
                             ) else stringResource(R.string.setting_provider_page_deselect_models)
+                        )
+                    }
+                }
+
+                if (remoteModels.loading) {
+                    LinearWavyProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                    )
+                }
+
+                remoteModels.error?.let { error ->
+                    Surface(
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp),
+                    ) {
+                        Text(
+                            text = error.message ?: error.javaClass.simpleName,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(12.dp),
                         )
                     }
                 }
@@ -1040,9 +1082,9 @@ private fun ModelPicker(
     }
     BadgedBox(
         badge = {
-            if (models.isNotEmpty()) {
+            if (remoteModels.models.isNotEmpty()) {
                 Badge {
-                    Text(models.size.toString())
+                    Text(remoteModels.models.size.toString())
                 }
             }
         }

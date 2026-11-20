@@ -18,6 +18,8 @@ import com.termux.view.TerminalViewClient
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.workspace.RootfsPatchOptions
 import me.rerere.workspace.RootfsPatcher
+import me.rerere.workspace.WorkspaceBindMount
+import me.rerere.workspace.WorkspaceMountUnavailableException
 import java.io.File
 
 internal fun createWorkspaceTerminalSession(
@@ -25,7 +27,12 @@ internal fun createWorkspaceTerminalSession(
     root: String,
     client: TerminalSessionClient,
     shellCompatibilityMode: Boolean,
+    extraMounts: List<WorkspaceBindMount> = emptyList(),
 ): TerminalSession {
+    val unavailable = extraMounts.filterNot { it.source.isDirectory }
+    if (unavailable.isNotEmpty()) {
+        throw WorkspaceMountUnavailableException(unavailable.map { it.target })
+    }
     val appContext = context.applicationContext
     val workspaceDir = File(File(appContext.filesDir, "workspaces"), root)
     val filesDir = File(workspaceDir, "files")
@@ -49,6 +56,10 @@ internal fun createWorkspaceTerminalSession(
         "-b",
         "${skillsDir.absolutePath}:$SKILLS_DIR",
     )
+    extraMounts.forEach { mount ->
+        args += "-b"
+        args += "${mount.source.absolutePath}:${mount.target}"
+    }
     listOf("/dev", "/proc", "/sys").forEach { path ->
         if (File(path).exists()) {
             args += "-b"

@@ -21,6 +21,7 @@ import me.rerere.rikkahub.utils.generateUnifiedDiff
 import me.rerere.workspace.BackgroundStatus
 import me.rerere.workspace.WorkspaceCommandResult
 import me.rerere.workspace.WorkspaceFileEntry
+import me.rerere.workspace.WorkspaceLayout
 import me.rerere.workspace.WorkspaceManager
 import me.rerere.workspace.WorkspaceTreeResult
 import org.koin.java.KoinJavaComponent.getKoin
@@ -56,15 +57,16 @@ suspend fun createWorkspaceTools(
 ): List<Tool> {
     if (workspaceId.isNullOrBlank()) return emptyList()
     val approvalOverrides = workspaceRepository.getById(workspaceId)?.toolApprovalOverrides().orEmpty()
+    val layout = workspaceRepository.layout(workspaceId)
     fun needsApproval(name: String) = resolveWorkspaceToolApproval(name, approvalOverrides)
 
     val shellCwd = cwd?.removePrefix("/workspace/")?.removePrefix("/workspace")
 
     return buildList {
         add(createReadFileTool(workspaceId, ::needsApproval, workspaceRepository))
-        add(createWriteFileTool(workspaceId, ::needsApproval, workspaceRepository))
-        add(createEditFileTool(workspaceId, ::needsApproval, workspaceRepository))
-        add(createCreateFolderTool(workspaceId, ::needsApproval, workspaceRepository))
+        add(createWriteFileTool(workspaceId, ::needsApproval, workspaceRepository, layout))
+        add(createEditFileTool(workspaceId, ::needsApproval, workspaceRepository, layout))
+        add(createCreateFolderTool(workspaceId, ::needsApproval, workspaceRepository, layout))
         add(createReadFolderTool(workspaceId, ::needsApproval, workspaceRepository))
         add(createShellTool(workspaceId, ::needsApproval, workspaceRepository, shellCwd))
         add(createRunBackgroundTool(workspaceId, ::needsApproval, workspaceRepository, shellCwd))
@@ -147,6 +149,7 @@ private fun createWriteFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
+    layout: WorkspaceLayout,
 ) = Tool(
     name = "workspace_write_file",
     description = """
@@ -169,7 +172,7 @@ private fun createWriteFileTool(
             required = listOf("path", "text"),
         )
     },
-    needsApproval = { needsApproval("workspace_write_file") || it.pathOutsideWritableRoots("path") },
+    needsApproval = { needsApproval("workspace_write_file") || it.pathOutsideWritableRoots("path", layout) },
     execute = {
         val params = it.jsonObject
         val path = params.absolutePath("path")
@@ -189,6 +192,7 @@ private fun createEditFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
+    layout: WorkspaceLayout,
 ) = Tool(
     name = "workspace_edit_file",
     description = """
@@ -217,7 +221,7 @@ private fun createEditFileTool(
             required = listOf("path", "old_text", "new_text"),
         )
     },
-    needsApproval = { needsApproval("workspace_edit_file") || it.pathOutsideWritableRoots("path") },
+    needsApproval = { needsApproval("workspace_edit_file") || it.pathOutsideWritableRoots("path", layout) },
     execute = {
         val params = it.jsonObject
         val path = params.absolutePath("path")
@@ -258,6 +262,7 @@ private fun createCreateFolderTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
+    layout: WorkspaceLayout,
 ) = Tool(
     name = "workspace_create_folder",
     description = """
@@ -273,7 +278,7 @@ private fun createCreateFolderTool(
             required = listOf("path"),
         )
     },
-    needsApproval = { needsApproval("workspace_create_folder") || it.pathOutsideWritableRoots("path") },
+    needsApproval = { needsApproval("workspace_create_folder") || it.pathOutsideWritableRoots("path", layout) },
     execute = {
         val path = it.jsonObject.absolutePath("path")
         val entry = workspaceRepository.createFolderInRootfs(workspaceId, path)
@@ -681,9 +686,12 @@ private fun kotlinx.serialization.json.JsonObject.absolutePath(name: String): St
 // 免强制审批的可写安全区: 工作区文件目录、临时目录和技能目录
 private val WRITABLE_ROOT_PREFIXES = listOf("/workspace", "/tmp", "/skills")
 
-private fun kotlinx.serialization.json.JsonElement.pathOutsideWritableRoots(name: String): Boolean =
+private fun kotlinx.serialization.json.JsonElement.pathOutsideWritableRoots(
+    name: String,
+    layout: WorkspaceLayout,
+): Boolean =
     runCatching {
-        jsonObject.absolutePath(name).isOutsideWritableRoots()
+        !layout.isWritable(jsonObject.absolutePath(name))
     }.getOrDefault(true)
 
 internal fun String.isOutsideWritableRoots(): Boolean {

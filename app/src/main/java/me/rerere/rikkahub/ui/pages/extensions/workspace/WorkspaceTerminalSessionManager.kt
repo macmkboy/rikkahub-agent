@@ -17,6 +17,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.rerere.rikkahub.AppScope
+import me.rerere.rikkahub.R
+import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.workspace.WorkspaceMountUnavailableException
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -29,6 +32,7 @@ import java.util.concurrent.atomic.AtomicLong
 class WorkspaceTerminalSessionManager internal constructor(
     context: Context,
     private val appScope: AppScope,
+    private val workspaceRepository: WorkspaceRepository,
 ) {
     private val appContext = context.applicationContext
     private val workspaceStates = MutableStateFlow<Map<String, WorkspaceTerminalTabsState>>(emptyMap())
@@ -40,12 +44,12 @@ class WorkspaceTerminalSessionManager internal constructor(
             .map { states -> states[root] ?: WorkspaceTerminalTabsState() }
             .distinctUntilChanged()
 
-    internal fun ensureSession(root: String, shellCompatibilityMode: Boolean) {
-        launchCreateTab(root = root, onlyIfEmpty = true, shellCompatibilityMode = shellCompatibilityMode)
+    internal fun ensureSession(workspaceId: String, root: String, shellCompatibilityMode: Boolean) {
+        launchCreateTab(workspaceId = workspaceId, root = root, onlyIfEmpty = true, shellCompatibilityMode = shellCompatibilityMode)
     }
 
-    internal fun createTab(root: String, shellCompatibilityMode: Boolean) {
-        launchCreateTab(root = root, onlyIfEmpty = false, shellCompatibilityMode = shellCompatibilityMode)
+    internal fun createTab(workspaceId: String, root: String, shellCompatibilityMode: Boolean) {
+        launchCreateTab(workspaceId = workspaceId, root = root, onlyIfEmpty = false, shellCompatibilityMode = shellCompatibilityMode)
     }
 
     internal fun selectTab(root: String, tabId: Long) {
@@ -98,13 +102,13 @@ class WorkspaceTerminalSessionManager internal constructor(
         }
     }
 
-    private fun launchCreateTab(root: String, onlyIfEmpty: Boolean, shellCompatibilityMode: Boolean) {
+    private fun launchCreateTab(workspaceId: String, root: String, onlyIfEmpty: Boolean, shellCompatibilityMode: Boolean) {
         if (root in creationJobs) return
 
         lateinit var job: Job
         job = appScope.launch(start = CoroutineStart.LAZY) {
             try {
-                createTab(root = root, onlyIfEmpty = onlyIfEmpty, shellCompatibilityMode = shellCompatibilityMode)
+                createTab(workspaceId = workspaceId, root = root, onlyIfEmpty = onlyIfEmpty, shellCompatibilityMode = shellCompatibilityMode)
             } finally {
                 creationJobs.remove(root, job)
             }
@@ -113,12 +117,21 @@ class WorkspaceTerminalSessionManager internal constructor(
         job.start()
     }
 
-    private suspend fun createTab(root: String, onlyIfEmpty: Boolean, shellCompatibilityMode: Boolean) = withContext(Dispatchers.Main.immediate) {
+    private suspend fun createTab(
+        workspaceId: String,
+        root: String,
+        onlyIfEmpty: Boolean,
+        shellCompatibilityMode: Boolean,
+    ) = withContext(Dispatchers.Main.immediate) {
+        // 调用方拿到的可能是旧快照, 挂载表等配置以数据库为准
+        val latestWorkspace = workspaceRepository.getById(workspaceId)
+        val effectiveCompat = latestWorkspace?.shellCompatibilityMode ?: shellCompatibilityMode
+        val extraMounts = latestWorkspace?.extraBindMounts().orEmpty()
         val initialState = currentState(root)
         if (initialState.isCreating || (onlyIfEmpty && initialState.tabs.isNotEmpty())) {
             return@withContext
         }
-        updateState(root) { it.copy(isCreating = true) }
+        updateState(root) { it.copy(isCreating = true, errorMessage = null) }
 
         val prepared = if (initialState.readiness == WorkspaceTerminalReadiness.Ready) {
             true
@@ -157,19 +170,30 @@ class WorkspaceTerminalSessionManager internal constructor(
             onTitleUpdated = { title -> updateTitle(root, tabId, title) },
             onFinished = { markFinished(root = root, tabId = tabId) },
         )
-        val session = runCatching {
+        val result = runCatching {
             createWorkspaceTerminalSession(
                 context = appContext,
                 root = root,
                 client = client,
-                shellCompatibilityMode = shellCompatibilityMode,
+                shellCompatibilityMode = effectiveCompat,
+                extraMounts = extraMounts,
             )
         }.onFailure { error ->
             Log.e(TAG, "Failed to create terminal for workspace $root", error)
-        }.getOrNull()
+        }
+        val session = result.getOrNull()
 
         if (session == null) {
-            updateState(root) { it.copy(isCreating = false) }
+            // 例如工作区挂载的目录失效, 界面上要能看到原因
+            val message = when (val error = result.exceptionOrNull()) {
+                is WorkspaceMountUnavailableException -> appContext.getString(
+                    R.string.workspace_terminal_mounts_unavailable,
+                    error.targets.joinToString(),
+                )
+
+                else -> error?.message ?: appContext.getString(R.string.workspace_terminal_start_failed)
+            }
+            updateState(root) { it.copy(isCreating = false, errorMessage = message) }
             return@withContext
         }
 
@@ -240,6 +264,8 @@ internal data class WorkspaceTerminalTabsState(
     val readiness: WorkspaceTerminalReadiness = WorkspaceTerminalReadiness.Loading,
     val isCreating: Boolean = false,
     val nextTabNumber: Int = 1,
+    /** 最近一次新建终端失败的原因 */
+    val errorMessage: String? = null,
 )
 
 internal data class WorkspaceTerminalTab(

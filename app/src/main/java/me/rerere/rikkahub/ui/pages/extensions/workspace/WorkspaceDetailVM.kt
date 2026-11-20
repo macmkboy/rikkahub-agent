@@ -18,6 +18,7 @@ import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
+import me.rerere.rikkahub.data.model.WorkspaceStorageMount
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.workspace.RootfsInstallProgress
 import me.rerere.workspace.RootfsInstallStage
@@ -323,6 +324,20 @@ class WorkspaceDetailVM(
         viewModelScope.launch {
             try {
                 repository.setShellCompatibilityMode(id, enabled)
+                val workspace = repository.getById(id)
+                _state.update { it.copy(workspace = workspace) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                _settingsError.value = error.message.orEmpty()
+            }
+        }
+    }
+
+    fun setStorageMounts(mounts: List<WorkspaceStorageMount>) {
+        viewModelScope.launch {
+            try {
+                repository.setStorageMounts(id, mounts)
                 val workspace = repository.getById(id)
                 _state.update { it.copy(workspace = workspace) }
             } catch (error: CancellationException) {

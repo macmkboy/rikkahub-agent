@@ -15,6 +15,7 @@ import me.rerere.asr.ASRProviderSetting
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.ui.FormItem
 import me.rerere.rikkahub.ui.components.ui.OutlinedNumberInput
+import me.rerere.rikkahub.ui.components.ui.SelectTextField
 
 @Composable
 fun ASRProviderConfigure(
@@ -37,6 +38,7 @@ fun ASRProviderConfigure(
                     is ASRProviderSetting.Volcengine -> "Volcengine"
                     is ASRProviderSetting.MiMo -> "MiMo"
                     is ASRProviderSetting.Step -> "Step"
+                    is ASRProviderSetting.DeepSeek -> "DeepSeek"
                 },
                 onValueChange = {},
                 readOnly = true,
@@ -62,6 +64,7 @@ fun ASRProviderConfigure(
             is ASRProviderSetting.Volcengine -> VolcengineASRConfiguration(setting, onValueChange)
             is ASRProviderSetting.MiMo -> MiMoASRConfiguration(setting, onValueChange)
             is ASRProviderSetting.Step -> StepASRConfiguration(setting, onValueChange)
+            is ASRProviderSetting.DeepSeek -> DeepSeekASRConfiguration(setting, onValueChange)
         }
     }
 }
@@ -544,3 +547,65 @@ private fun StepASRConfiguration(
         )
     }
 }
+
+@Composable
+private fun DeepSeekASRConfiguration(
+    setting: ASRProviderSetting.DeepSeek,
+    onValueChange: (ASRProviderSetting) -> Unit
+) {
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_api_key)) },
+        description = { Text("DeepSeek 开放平台的 API Key") }
+    ) {
+        OutlinedTextField(
+            value = setting.apiKey,
+            onValueChange = { onValueChange(setting.copy(apiKey = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("sk-...") }
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_base_url)) },
+        description = { Text("请求地址为 {Base URL}/v1/tools/asr") }
+    ) {
+        OutlinedTextField(
+            value = setting.baseUrl,
+            onValueChange = { onValueChange(setting.copy(baseUrl = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("https://api.deepseek.com") }
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_sample_rate)) },
+        description = { Text("录音采样率，16000 Hz 即可满足识别") }
+    ) {
+        SelectTextField(
+            value = "${setting.sampleRate} Hz",
+            options = DEEPSEEK_ASR_SAMPLE_RATES,
+            onOptionSelected = { onValueChange(setting.copy(sampleRate = it)) },
+            readOnly = true,
+            optionToString = { "$it Hz" },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_segment_duration)) },
+        description = { Text("录音每满多少秒上传识别一段，0 表示停止录音时才上传。单段最长约 110 秒，超出会自动切段") }
+    ) {
+        OutlinedNumberInput(
+            value = setting.segmentDurationSec,
+            onValueChange = { value ->
+                if (value in 0..110) {
+                    onValueChange(setting.copy(segmentDurationSec = value))
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            label = "Segment Duration (s)"
+        )
+    }
+}
+
+private val DEEPSEEK_ASR_SAMPLE_RATES = listOf(8000, 16000, 22050, 24000, 32000, 44100, 48000)

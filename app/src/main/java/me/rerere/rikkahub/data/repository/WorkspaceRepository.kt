@@ -10,17 +10,21 @@ import kotlinx.coroutines.withContext
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.db.dao.WorkspaceDAO
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
+import me.rerere.rikkahub.data.model.WorkspaceStorageMount
+import me.rerere.rikkahub.data.model.normalizeStorageMountPath
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.workspace.BackgroundStatus
 import me.rerere.workspace.RootfsInstallProgress
 import me.rerere.workspace.RootfsInstaller
 import me.rerere.workspace.WorkspaceCommandResult
 import me.rerere.workspace.WorkspaceFileEntry
+import me.rerere.workspace.WorkspaceLayout
 import me.rerere.workspace.WorkspaceManager
 import me.rerere.workspace.WorkspaceShellStatus
 import me.rerere.workspace.WorkspaceStorageArea
 import me.rerere.workspace.WorkspaceTreeResult
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import kotlin.uuid.Uuid
@@ -33,9 +37,14 @@ class WorkspaceRepository(
 ) {
     fun listFlow(): Flow<List<WorkspaceEntity>> = dao.listFlow()
 
-    suspend fun resolveAbsoluteFile(id: String, path: String): java.io.File? = withContext(Dispatchers.IO) {
+    suspend fun resolveAbsoluteFile(id: String, path: String): File? = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: return@withContext null
-        manager.resolveRootfsFile(workspace.root, path)
+        manager.resolveRootfsFile(workspace.root, path, workspace.extraBindMounts())
+    }
+
+    suspend fun layout(id: String): WorkspaceLayout = withContext(Dispatchers.IO) {
+        val workspace = dao.getById(id)
+        manager.layout(workspace?.extraBindMounts().orEmpty())
     }
 
     suspend fun checkIntegrity() = withContext(Dispatchers.IO) {
@@ -108,6 +117,31 @@ class WorkspaceRepository(
 
     suspend fun setShellCompatibilityMode(id: String, enabled: Boolean) {
         dao.setShellCompatibilityMode(id, enabled, System.currentTimeMillis())
+    }
+
+    /**
+     * 保存共享存储挂载列表, 路径规范化后按路径去重; 只对下次执行的命令和新开的终端生效。
+     * 新加入的路径必须是可访问的目录, 已保存的路径不再校验, 这样 SD 卡拔出后仍能删除或修改其他条目。
+     */
+    suspend fun setStorageMounts(id: String, mounts: List<WorkspaceStorageMount>) {
+        val workspace = dao.getById(id) ?: error("Workspace not found: $id")
+        val savedPaths = workspace.storageMountList().mapTo(HashSet()) { it.path }
+        val normalized = mounts
+            .map { it.copy(path = normalizeStorageMountPath(it.path)) }
+            .distinctBy { it.path }
+        withContext(Dispatchers.IO) {
+            normalized.filterNot { it.path in savedPaths }.forEach { mount ->
+                require(File(mount.path).isDirectory) {
+                    "Folder does not exist, or all files access is not granted: ${mount.path}"
+                }
+            }
+        }
+        dao.upsert(
+            workspace.copy(
+                storageMounts = JsonInstant.encodeToString(normalized),
+                updatedAt = System.currentTimeMillis(),
+            )
+        )
     }
 
     suspend fun setToolApproval(id: String, toolName: String, needsApproval: Boolean): Boolean {
@@ -259,7 +293,7 @@ class WorkspaceRepository(
     ): Long = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
         manager.ensureWorkspace(workspace.root)
-        manager.rootfsFileSize(workspace.root, path)
+        manager.rootfsFileSize(workspace.root, path, workspace.extraBindMounts())
     }
 
     /** 按 Rootfs 内绝对路径导出文件内容, 支持 /workspace、bind mount 与 Rootfs 内部路径 */
@@ -270,7 +304,7 @@ class WorkspaceRepository(
     ) = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
         manager.ensureWorkspace(workspace.root)
-        manager.exportRootfsFile(workspace.root, path, outputStream)
+        manager.exportRootfsFile(workspace.root, path, outputStream, workspace.extraBindMounts())
     }
 
     /** 按 Rootfs 内绝对路径递归列出目录树, 支持 /workspace、bind mount 与 Rootfs 内部路径 */
@@ -280,7 +314,7 @@ class WorkspaceRepository(
     ): WorkspaceTreeResult = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
         manager.ensureWorkspace(workspace.root)
-        manager.rootfsTree(workspace.root, path)
+        manager.rootfsTree(workspace.root, path, extraMounts = workspace.extraBindMounts())
     }
 
     suspend fun deleteFile(
@@ -321,6 +355,7 @@ class WorkspaceRepository(
             manager.executeCommand(
                 workspace.root, command, cwd, timeoutMillis, stdin,
                 shellCompatibilityMode = workspace.shellCompatibilityMode,
+                extraMounts = workspace.extraBindMounts(),
             )
         }
     }
@@ -338,7 +373,13 @@ class WorkspaceRepository(
         // 不可被取消、结果不会被丢弃；Dispatchers.IO 仍然只是把阻塞的进程启动挪到后台线程。
         return withContext(NonCancellable + Dispatchers.IO) {
             manager.ensureWorkspace(workspace.root)
-            manager.startBackground(workspace.root, command, cwd)
+            manager.startBackground(
+                workspace.root,
+                command,
+                cwd,
+                shellCompatibilityMode = workspace.shellCompatibilityMode,
+                extraMounts = workspace.extraBindMounts(),
+            )
         }
     }
 

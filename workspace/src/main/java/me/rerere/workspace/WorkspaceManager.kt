@@ -20,11 +20,37 @@ class WorkspaceManager(
     // 缺失而失败并抛出), 不会出现"进程活着但 workspace 目录已删"的孤儿进程
     private val backgroundLifecycleLock = Any()
 
-    // 按 target 长度降序, 保证 /a/b 优先于 /a 匹配
-    private val sortedBindMounts = bindMounts.sortedByDescending { it.target.trimEnd('/').length }
-
     init {
         baseDir.mkdirs()
+    }
+
+    /**
+     * 工作区的目录约定。
+     *
+     * [extraMounts] 是单个工作区自己的挂载 (如用户配置的外部存储目录), 叠加在全局挂载表之后;
+     * 下面凡是带这个参数的方法, 调用方需传入同一份列表, 否则 PRoot 内外看到的路径会对不上。
+     */
+    fun layout(extraMounts: List<WorkspaceBindMount> = emptyList()): WorkspaceLayout {
+        val (writable, approval) = mountsOf(extraMounts).partition { it.writable }
+        return WorkspaceLayout(
+            workspaceDir = ROOTFS_WORKSPACE_DIR,
+            writableRoots = listOf(ROOTFS_WORKSPACE_DIR, "/tmp") + writable.map { it.target.trimEnd('/') },
+            approvalRoots = approval.map { it.target.trimEnd('/') },
+        )
+    }
+
+    private fun mountsOf(extraMounts: List<WorkspaceBindMount>): List<WorkspaceBindMount> =
+        if (extraMounts.isEmpty()) bindMounts else bindMounts + extraMounts
+
+    /**
+     * PRoot 会跳过不存在的源目录, 这时 Rootfs 里对应路径落回 Rootfs 自身:
+     * 写入能「成功」, 文件却不在挂载源里, 文件工具也读不到。工作区挂载失效时直接报错。
+     */
+    private fun requireMountsAvailable(extraMounts: List<WorkspaceBindMount>) {
+        val unavailable = extraMounts.filterNot { it.source.isDirectory }
+        if (unavailable.isNotEmpty()) {
+            throw WorkspaceMountUnavailableException(unavailable.map { it.target })
+        }
     }
 
     fun ensureWorkspace(root: String): File {
@@ -133,11 +159,16 @@ class WorkspaceManager(
      * 可以直接用文件 IO 访问, 无需经过 PRoot; 只是 Rootfs 目录里对应位置是个空挂载点,
      * 按 [WorkspaceStorageArea.LINUX] 解析必然落空。
      */
-    fun resolveRootfsPath(root: String, path: String): RootfsLocation {
+    fun resolveRootfsPath(
+        root: String,
+        path: String,
+        extraMounts: List<WorkspaceBindMount> = emptyList(),
+    ): RootfsLocation {
         val trimmed = path.trim().trimEnd('/').ifBlank { "/" }
         require(trimmed.startsWith("/")) { "Rootfs path must be absolute: $path" }
 
-        sortedBindMounts.forEach { mount ->
+        // 按 target 长度降序, 保证 /a/b 优先于 /a 匹配
+        mountsOf(extraMounts).sortedByDescending { it.target.trimEnd('/').length }.forEach { mount ->
             val target = mount.target.trimEnd('/')
             if (trimmed == target) return RootfsLocation(mount.source, "")
             if (trimmed.startsWith("$target/")) {
@@ -160,24 +191,42 @@ class WorkspaceManager(
         return RootfsLocation(linuxDir(root), trimmed.trimStart('/'))
     }
 
-    fun rootfsFileSize(root: String, path: String): Long =
-        resolveRootfsFile(root, path).also { it.requireReadableFile(path) }.length()
+    fun rootfsFileSize(
+        root: String,
+        path: String,
+        extraMounts: List<WorkspaceBindMount> = emptyList(),
+    ): Long =
+        resolveRootfsFile(root, path, extraMounts).also { it.requireReadableFile(path) }.length()
 
-    fun exportRootfsFile(root: String, path: String, outputStream: OutputStream) {
-        val file = resolveRootfsFile(root, path)
+    fun exportRootfsFile(
+        root: String,
+        path: String,
+        outputStream: OutputStream,
+        extraMounts: List<WorkspaceBindMount> = emptyList(),
+    ) {
+        val file = resolveRootfsFile(root, path, extraMounts)
         file.requireReadableFile(path)
         outputStream.use { out -> file.inputStream().use { it.copyTo(out) } }
     }
 
     /** 按 Rootfs 内绝对路径递归列出目录树, 支持 /workspace、bind mount 与 Rootfs 内部路径 */
-    fun rootfsTree(root: String, path: String, maxDepth: Int = 10): WorkspaceTreeResult {
-        val location = resolveRootfsPath(root, path)
+    fun rootfsTree(
+        root: String,
+        path: String,
+        maxDepth: Int = 10,
+        extraMounts: List<WorkspaceBindMount> = emptyList(),
+    ): WorkspaceTreeResult {
+        val location = resolveRootfsPath(root, path, extraMounts)
         return fileSystem.tree(location.rootDir, location.relativePath, maxDepth)
     }
 
     /** Rootfs 内绝对路径对应的宿主机文件, 不检查是否存在 */
-    fun resolveRootfsFile(root: String, path: String): File {
-        val location = resolveRootfsPath(root, path)
+    fun resolveRootfsFile(
+        root: String,
+        path: String,
+        extraMounts: List<WorkspaceBindMount> = emptyList(),
+    ): File {
+        val location = resolveRootfsPath(root, path, extraMounts)
         return fileSystem.resolve(location.rootDir, location.relativePath)
     }
 
@@ -217,8 +266,10 @@ class WorkspaceManager(
         timeoutMillis: Long = DEFAULT_COMMAND_TIMEOUT_MS,
         stdin: ByteArray? = null,
         shellCompatibilityMode: Boolean = false,
+        extraMounts: List<WorkspaceBindMount> = emptyList(),
     ): WorkspaceCommandResult {
         require(command.isNotBlank()) { "Command is required" }
+        requireMountsAvailable(extraMounts)
         val workingDir = resolveCommandWorkingDir(root, cwd)
 
         return shellRunner.execute(
@@ -232,7 +283,7 @@ class WorkspaceManager(
                 workingDir = workingDir,
                 timeoutMillis = timeoutMillis,
                 stdin = stdin,
-                bindMounts = bindMounts,
+                bindMounts = mountsOf(extraMounts),
                 shellCompatibilityMode = shellCompatibilityMode,
             )
         )
@@ -244,9 +295,16 @@ class WorkspaceManager(
      * [backgroundStatus]/[killBackground]. Throws IllegalStateException if [root] is
      * already at the running-process cap.
      */
-    fun startBackground(root: String, command: String, cwd: String = ""): BackgroundStatus =
+    fun startBackground(
+        root: String,
+        command: String,
+        cwd: String = "",
+        shellCompatibilityMode: Boolean = false,
+        extraMounts: List<WorkspaceBindMount> = emptyList(),
+    ): BackgroundStatus =
         synchronized(backgroundLifecycleLock) {
             require(command.isNotBlank()) { "Command is required" }
+            requireMountsAvailable(extraMounts)
             val workingDir = resolveCommandWorkingDir(root, cwd)
 
             val process = shellRunner.start(
@@ -259,6 +317,8 @@ class WorkspaceManager(
                     tempDir = tempDir(root),
                     workingDir = workingDir,
                     timeoutMillis = 0L,
+                    bindMounts = mountsOf(extraMounts),
+                    shellCompatibilityMode = shellCompatibilityMode,
                 )
             )
             background.start(root, process, command, cwd)
@@ -318,6 +378,14 @@ class WorkspaceManager(
         private val ROOT_NAME_REGEX = Regex("[A-Za-z0-9._-]+")
     }
 }
+
+/** 工作区挂载的源目录不存在或无权访问; 消息是英文, 会原样交给 AI, 界面按 [targets] 自行本地化 */
+class WorkspaceMountUnavailableException(
+    val targets: List<String>,
+) : IllegalArgumentException(
+    "Mounted directories are unavailable (missing, or storage permission not granted): " +
+        targets.joinToString() + ". Fix or remove them in the workspace settings."
+)
 
 /** Rootfs 内绝对路径在宿主机上的落点 */
 data class RootfsLocation(
