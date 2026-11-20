@@ -480,6 +480,19 @@ class SubAgentEngine(
         org.koin.java.KoinJavaComponent.getKoin().get<ChatService>()
     }
 
+    private val worktreeIsolator: GitWorktreeIsolator by lazy {
+        GitWorktreeIsolator(
+            DefaultWorktreeShellExecutor(
+                workspaceRepositoryProvider = {
+                    org.koin.core.context.GlobalContext.getOrNull()?.getOrNull<me.rerere.rikkahub.data.repository.WorkspaceRepository>()
+                },
+                contextProvider = {
+                    org.koin.core.context.GlobalContext.getOrNull()?.getOrNull<android.content.Context>()
+                },
+            )
+        )
+    }
+
     private val ledgerIds = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /**
@@ -874,10 +887,18 @@ class SubAgentEngine(
             maxSteps = request.maxTrips.coerceIn(1, SubAgentDefaults.MAX_MAX_TRIPS),
         )
 
+        val parentAsst = parentAsstUuid?.let { settings.findAssistantById(it) }
         val parentConv = parentChatId?.let { runCatching { Uuid.parse(it) }.getOrNull() }?.let { conversationRepo.getConversationById(it) }
         val baseWorkspaceCwd = parentConv?.workspaceCwd
-        val isolatedWorktreeDir = if (settings.subAgentWorktreeIsolation) prepareIsolatedGitWorktreeIfEligible(baseWorkspaceCwd, runId, toolPolicy) else null
-        val effectiveWorkspaceCwd = isolatedWorktreeDir ?: baseWorkspaceCwd
+        val isolatedWorktree = if (settings.subAgentWorktreeIsolation) {
+            worktreeIsolator.prepareIfEligible(
+                workspaceId = parentAsst?.workspaceId?.toString(),
+                baseCwd = baseWorkspaceCwd,
+                runId = runId,
+                policy = toolPolicy,
+            )
+        } else null
+        val effectiveWorkspaceCwd = isolatedWorktree?.worktreePath ?: baseWorkspaceCwd
 
         val effectiveAgentName = profile?.name ?: effectiveAgent ?: request.agentName
         val cleanTaskOrLabel = request.label?.take(40) ?: request.task.take(40)
@@ -887,7 +908,6 @@ class SubAgentEngine(
             "[Sub-agent] $cleanTaskOrLabel"
         }
 
-        val parentAsst = parentAsstUuid?.let { settings.findAssistantById(it) }
         val baseConfig = parentAsst?.toConversationConfig() ?: ConversationConfig()
         val subAgentConfig = baseConfig.copy(
             chatModelId = resolvedChatModelId,
@@ -968,82 +988,13 @@ class SubAgentEngine(
             harvestMetricsAndFinish(runId, conv.id, terminal, error = "${t::class.simpleName}: ${t.message.orEmpty()}")
             notifyParentIfBackground(parentChatId, registry.get(runId))
         } finally {
-            if (baseWorkspaceCwd != null && isolatedWorktreeDir != null) {
-                cleanupIsolatedGitWorktreeIfClean(baseWorkspaceCwd, isolatedWorktreeDir)
+            if (isolatedWorktree != null) {
+                worktreeIsolator.cleanupIfClean(isolatedWorktree)
             }
             SubAgentToolPolicies.unregister(conv.id)
             SubAgentFallbackPolicies.unregister(conv.id)
             HeadlessConversations.unmark(conv.id)
             registry.clearJob(runId)
-        }
-    }
-
-    /**
-     * Creates an isolated git worktree (`<baseCwd>/.rikkahub-worktrees/<runId>`) when a parallel
-     * sub-agent with file-mutating capabilities runs inside a Git repository. Falls back cleanly
-     * to null (shared workspaceCwd) when git is unavailable or the workspace is not a git repo.
-     */
-    private fun prepareIsolatedGitWorktreeIfEligible(
-        baseCwd: String?,
-        runId: String,
-        policy: SubAgentToolPolicy,
-    ): String? {
-        if (baseCwd.isNullOrBlank()) return null
-        val mutatingTools = setOf(
-            "workspace_write_file",
-            "workspace_edit_file",
-            "workspace_shell",
-            "write_file",
-            "edit_file",
-            "write_text_file",
-        )
-        if (policy.allowedNames.none { it in mutatingTools }) return null
-        return runCatching {
-            val repoDir = java.io.File(baseCwd)
-            if (!repoDir.isDirectory || !java.io.File(repoDir, ".git").exists()) return null
-            val worktreesRoot = java.io.File(repoDir, ".rikkahub-worktrees")
-            worktreesRoot.mkdirs()
-            val safeId = runId.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(32)
-            val targetDir = java.io.File(worktreesRoot, safeId)
-            if (targetDir.exists()) return targetDir.absolutePath
-            val proc = ProcessBuilder("git", "worktree", "add", "--detach", targetDir.absolutePath, "HEAD")
-                .directory(repoDir)
-                .redirectErrorStream(true)
-                .start()
-            val finished = proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
-            if (finished && proc.exitValue() == 0 && targetDir.isDirectory) {
-                targetDir.absolutePath
-            } else {
-                if (!finished) proc.destroyForcibly()
-                null
-            }
-        }.getOrNull()
-    }
-
-    private fun cleanupIsolatedGitWorktreeIfClean(baseCwd: String, worktreePath: String) {
-        runCatching {
-            val repoDir = java.io.File(baseCwd)
-            val wtDir = java.io.File(worktreePath)
-            if (!wtDir.isDirectory) return
-            val statusProc = ProcessBuilder("git", "status", "--porcelain")
-                .directory(wtDir)
-                .redirectErrorStream(true)
-                .start()
-            val finished = statusProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)
-            if (!finished) {
-                statusProc.destroyForcibly()
-                return
-            }
-            val output = statusProc.inputStream.bufferedReader().readText().trim()
-            if (statusProc.exitValue() == 0 && output.isEmpty()) {
-                val rmProc = ProcessBuilder("git", "worktree", "remove", "--force", wtDir.absolutePath)
-                    .directory(repoDir)
-                    .redirectErrorStream(true)
-                    .start()
-                if (!rmProc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                    rmProc.destroyForcibly()
-                }
-            }
         }
     }
 

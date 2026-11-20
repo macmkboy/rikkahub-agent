@@ -5,10 +5,18 @@ import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toInstant
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ModelAbility
+import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.tools.MemoryToolNames
+import me.rerere.rikkahub.data.datastore.Settings
+import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.repository.memoryId
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -178,5 +186,60 @@ class MemoryConsolidatorTest {
             """.trimIndent(),
             transcript,
         )
+    }
+
+    @Test
+    fun `automatic consolidation does not silently fall back to GeminiOAuth chat model`() {
+        val oauthModel = Model(modelId = "gemini-3.8-flash-high", abilities = listOf(ModelAbility.TOOL))
+        val oauthProvider = ProviderSetting.GeminiOAuth(enabled = true, models = listOf(oauthModel))
+        val assistant = Assistant(enableMemory = true, chatModelId = oauthModel.id)
+        val settings = Settings(
+            providers = listOf(oauthProvider),
+            assistants = listOf(assistant),
+            chatModelId = oauthModel.id,
+        )
+
+        // Automatic background run must skip silent GeminiOAuth fallback
+        assertNull(settings.consolidationModel(assistant = assistant, allowOAuthFallback = false))
+        // Manual "Dream now" allows GeminiOAuth fallback
+        assertEquals(oauthModel.id, settings.consolidationModel(assistant = assistant, allowOAuthFallback = true)?.first?.id)
+        // Explicit memoryModelId on GeminiOAuth is honored even for automatic runs
+        val explicitSettings = settings.copy(memoryModelId = oauthModel.id)
+        assertEquals(oauthModel.id, explicitSettings.consolidationModel(assistant = assistant, allowOAuthFallback = false)?.first?.id)
+    }
+
+    @Test
+    fun `consolidation fallback requires ModelAbility TOOL on chat model`() {
+        val nonToolModel = Model(modelId = "gpt-no-tools", abilities = emptyList())
+        val toolModel = Model(modelId = "gpt-with-tools", abilities = listOf(ModelAbility.TOOL))
+        val provider = ProviderSetting.OpenAI(enabled = true, models = listOf(nonToolModel, toolModel))
+        val nonToolAssistant = Assistant(enableMemory = true, chatModelId = nonToolModel.id)
+        val toolAssistant = Assistant(enableMemory = true, chatModelId = toolModel.id)
+        val settings = Settings(
+            providers = listOf(provider),
+            assistants = listOf(nonToolAssistant, toolAssistant),
+            chatModelId = nonToolModel.id,
+        )
+
+        assertNull(settings.consolidationModel(assistant = nonToolAssistant, allowOAuthFallback = true))
+        assertNotNull(settings.consolidationModel(assistant = toolAssistant, allowOAuthFallback = false))
+    }
+
+    @Test
+    fun `local on-device consolidation check is scoped per assistant memory store`() {
+        val localModel = Model(modelId = "gemma-local", abilities = listOf(ModelAbility.TOOL))
+        val cloudModel = Model(modelId = "gpt-4o-mini", abilities = listOf(ModelAbility.TOOL))
+        val localProvider = ProviderSetting.LiteRtLocal(enabled = true, models = listOf(localModel))
+        val cloudProvider = ProviderSetting.OpenAI(enabled = true, models = listOf(cloudModel))
+        val localAssistant = Assistant(enableMemory = true, useGlobalMemory = false, chatModelId = localModel.id)
+        val cloudAssistant = Assistant(enableMemory = true, useGlobalMemory = false, chatModelId = cloudModel.id)
+        val settings = Settings(
+            providers = listOf(localProvider, cloudProvider),
+            assistants = listOf(localAssistant, cloudAssistant),
+            chatModelId = cloudModel.id,
+        )
+
+        assertTrue(settings.usesLocalOnDeviceConsolidationModel(localAssistant.memoryId))
+        assertFalse(settings.usesLocalOnDeviceConsolidationModel(cloudAssistant.memoryId))
     }
 }

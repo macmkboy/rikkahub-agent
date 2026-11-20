@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.ui.pages.assistant.detail
 
 import android.text.format.DateUtils
+import android.widget.Toast
 import androidx.annotation.StringRes
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Add01
@@ -33,6 +34,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -64,6 +67,7 @@ import me.rerere.rikkahub.ui.components.ui.PagerTab
 import me.rerere.rikkahub.ui.components.ui.PagerTabs
 import me.rerere.rikkahub.ui.components.ui.switchItem
 import me.rerere.rikkahub.ui.context.LocalNavController
+import me.rerere.rikkahub.ui.pages.memory.formatResultText
 import me.rerere.rikkahub.ui.pages.memory.resultText
 import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.ui.components.RikkaConfirmDialog
@@ -95,9 +99,20 @@ fun AssistantMemoryPage(id: String) {
     val memories by vm.memories.collectAsStateWithLifecycle()
     val consolidation by vm.memoryConsolidation.collectAsStateWithLifecycle()
     val navController = LocalNavController.current
+    val context = LocalContext.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val pagerState = rememberPagerState { MemoryTab.entries.size }
     val scope = rememberCoroutineScope()
+    var awaitingManualDreamFeedback by remember { mutableStateOf(false) }
+
+    LaunchedEffect(consolidation.running, consolidation.lastRun?.finishedAt) {
+        if (awaitingManualDreamFeedback && !consolidation.running) {
+            awaitingManualDreamFeedback = false
+            val message = consolidation.lastRun?.formatResultText(context)
+                ?: context.getString(R.string.assistant_page_memory_dream_no_changes)
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -144,7 +159,10 @@ fun AssistantMemoryPage(id: String) {
                     MemoryTab.FILES -> MemoryFilesTab(
                         memories = memories,
                         consolidation = consolidation.takeIf { assistant.enableMemory },
-                        onOrganizeMemory = { vm.organizeMemory() },
+                        onOrganizeMemory = {
+                            awaitingManualDreamFeedback = true
+                            vm.organizeMemory()
+                        },
                         onOpenMemory = { path -> navController.navigate(Screen.MemoryFile(vm.memoryId, path)) },
                         onDeleteMemory = { vm.deleteMemory(it) },
                         onOpenSettings = {

@@ -71,6 +71,7 @@ class MemoryConsolidationSchedulerTest {
             memoryId: String,
             conversationIds: Set<Uuid>,
             fullReview: Boolean,
+            manual: Boolean,
         ): MemoryConsolidationRun? {
             calls += Call(conversationIds, fullReview)
             gate?.await()
@@ -507,5 +508,20 @@ class MemoryConsolidationSchedulerTest {
 
         assertEquals(1, worker.calls.size)
         assertEquals("model unavailable", scheduler.statusOf(memoryId).first().lastRun?.error)
+    }
+
+    @Test
+    fun `hiding the app only consolidates memory stores allowed by the predicate`() = runTest {
+        val scheduler = scheduler()
+        worker.memoryIdOf[otherChat.id] = "local-memory"
+
+        scheduler.finishTurn(chat, pendingTurns = 1)
+        scheduler.finishTurn(otherChat, pendingTurns = 1)
+        runCurrent()
+
+        scheduler.onAppHidden { id -> id != "local-memory" }
+        runCurrent()
+
+        assertEquals(listOf(setOf(chat.id)), worker.calls.map { it.conversationIds })
     }
 }

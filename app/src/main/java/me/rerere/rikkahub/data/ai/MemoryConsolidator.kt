@@ -18,6 +18,7 @@ import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderManager
+import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.data.ai.prompts.MemoryConsolidationConversation
 import me.rerere.rikkahub.data.ai.prompts.buildMemoryConsolidationInput
@@ -152,9 +153,10 @@ class MemoryConsolidator(
         memoryId: String,
         conversationIds: Set<Uuid>,
         fullReview: Boolean,
+        manual: Boolean,
     ): MemoryConsolidationRun? = withContext(Dispatchers.IO) {
         try {
-            consolidateStore(memoryId, conversationIds, fullReview)
+            consolidateStore(memoryId, conversationIds, fullReview, manual)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -167,6 +169,7 @@ class MemoryConsolidator(
         memoryId: String,
         conversationIds: Set<Uuid>,
         fullReview: Boolean,
+        manual: Boolean,
     ): MemoryConsolidationRun? {
         val settings = settingsStore.awaitLoaded()
         val assistants = settings.assistants.filter { it.enableMemory && it.memoryId == memoryId }
@@ -183,14 +186,39 @@ class MemoryConsolidator(
             }
             .withinTranscriptBudget()
         val files = memoryRepository.getFiles(memoryId)
-        // 没有新的轮次时，只有手动清理且记忆库里有东西才值得调用模型
-        if (batches.isEmpty() && (!fullReview || files.isEmpty())) return null
+        // 没有新的轮次时，只有手动清理且记忆库里有东西才值得调用模型；手动触发仍返回明确结果供界面提示
+        if (batches.isEmpty() && (!fullReview || files.isEmpty())) {
+            return if (manual) {
+                MemoryConsolidationRun(
+                    memoryId = memoryId,
+                    finishedAt = System.currentTimeMillis(),
+                    fullReview = fullReview,
+                    outcome = ConsolidationOutcome.NOTHING_NEW,
+                )
+            } else {
+                null
+            }
+        }
 
-        val (model, reasoningLevel) = settings.consolidationModel(
-            batches.firstOrNull()?.conversation,
-            assistants.first()
+        val resolved = settings.consolidationModel(
+            conversation = batches.firstOrNull()?.conversation,
+            assistant = assistants.first(),
+            allowOAuthFallback = manual,
         )
-            ?: error("No model available")
+        if (resolved == null) {
+            if (!manual) {
+                Logging.log(TAG, "consolidate $memoryId: skipped automatic dreaming (no eligible non-OAuth tool-capable model)")
+                return null
+            }
+            return MemoryConsolidationRun(
+                memoryId = memoryId,
+                finishedAt = System.currentTimeMillis(),
+                fullReview = fullReview,
+                error = "No tool-capable model available for memory consolidation",
+                outcome = ConsolidationOutcome.SKIPPED_NO_MODEL,
+            )
+        }
+        val (model, reasoningLevel) = resolved
         val providerSetting = model.findProvider(settings.providers) ?: error("Provider not found")
         // 自动整理只增改；删文件只在用户手动要求清理整个记忆库时才允许
         val tools = buildMemoryTools(memoryRepository, memoryId)
@@ -235,8 +263,13 @@ class MemoryConsolidator(
         }
 
         // 生成中途失败会抛出，走不到这里：进度不推进，下次连同新的轮次一起重试
-        batches.forEach { batch ->
-            batch.pending.consolidatedThrough?.let { advance(batch.conversation.id, it) }
+        val advancedConversations = buildSet {
+            batches.forEach { batch ->
+                val through = batch.pending.consolidatedThrough
+                if (through != null && advance(batch.conversation.id, through)) {
+                    add(batch.conversation.id)
+                }
+            }
         }
 
         val steps = finished.message.getTools()
@@ -244,13 +277,21 @@ class MemoryConsolidator(
             .map { MemoryFile.normalizePath(it) ?: it }
             .distinct()
         val remaining = memoryRepository.getFiles(memoryId).associateBy { it.path }
+        val changedPaths = touched.filter { it in remaining }
+        val deletedPaths = touched.filterNot { it in remaining }
         return MemoryConsolidationRun(
             memoryId = memoryId,
             finishedAt = System.currentTimeMillis(),
             fullReview = fullReview,
-            changedPaths = touched.filter { it in remaining },
-            deletedPaths = touched.filterNot { it in remaining },
+            changedPaths = changedPaths,
+            deletedPaths = deletedPaths,
             titles = touched.mapNotNull { path -> remaining[path]?.let { path to it.title } }.toMap(),
+            advancedConversations = advancedConversations,
+            outcome = if (changedPaths.isNotEmpty() || deletedPaths.isNotEmpty()) {
+                ConsolidationOutcome.UPDATED
+            } else {
+                ConsolidationOutcome.NOTHING_NEW
+            },
         )
     }
 
@@ -304,18 +345,44 @@ private fun List<Batch>.withinTranscriptBudget(): List<Batch> {
     }
 }
 
-// 依次用记忆整理模型、快速模型，推理强度跟着用上的那个；整理要调用工具，都不支持时退回对话模型
+// 依次用记忆整理模型、快速模型，推理强度跟着用上的那个；整理要调用工具，都不支持时退回对话模型。
+// 自动后台整理默认不隐式回退到 GeminiOAuth（避免与前台对话争抢同一账号额度），显式指定 memoryModelId 或手动触发除外。
 internal fun Settings.consolidationModel(
     conversation: Conversation? = null,
     assistant: Assistant = getCurrentAssistant(),
+    allowOAuthFallback: Boolean = false,
 ): Pair<Model, ReasoningLevel>? {
     fun toolModel(id: Uuid?) = id?.let { findModelById(it) }?.takeIf { ModelAbility.TOOL in it.abilities }
-    val (model, reasoningLevel) = toolModel(memoryModelId)?.let { it to memoryModelReasoningLevel }
-        ?: toolModel(fastModelId)?.let { it to fastModelReasoningLevel }
-        ?: (conversation?.let { getChatModelOf(it) } ?: findModelById(assistant.chatModelId ?: chatModelId))
-            ?.let { it to fastModelReasoningLevel }
+    fun Model.isGeminiOAuth(): Boolean = findProvider(providers) is ProviderSetting.GeminiOAuth
+
+    val explicitMemory = toolModel(memoryModelId)?.let { it to memoryModelReasoningLevel }
+    if (explicitMemory != null) {
+        return explicitMemory.first.copy(tools = emptySet()) to explicitMemory.second
+    }
+
+    val fastFallback = toolModel(fastModelId)
+        ?.takeIf { allowOAuthFallback || !it.isGeminiOAuth() }
+        ?.let { it to fastModelReasoningLevel }
+    if (fastFallback != null) {
+        return fastFallback.first.copy(tools = emptySet()) to fastFallback.second
+    }
+
+    val chatFallback = (conversation?.let { getChatModelOf(it) } ?: findModelById(assistant.chatModelId ?: chatModelId))
+        ?.takeIf { ModelAbility.TOOL in it.abilities }
+        ?.takeIf { allowOAuthFallback || !it.isGeminiOAuth() }
+        ?.let { it to fastModelReasoningLevel }
         ?: return null
-    return model.copy(tools = emptySet()) to reasoningLevel
+
+    return chatFallback.first.copy(tools = emptySet()) to chatFallback.second
+}
+
+internal fun Settings.usesLocalOnDeviceConsolidationModel(memoryId: String): Boolean {
+    val memoryAssistants = assistants.filter { it.enableMemory && it.memoryId == memoryId }
+    if (memoryAssistants.isEmpty()) return false
+    return memoryAssistants.any { assistant ->
+        val provider = consolidationModel(assistant = assistant)?.first?.findProvider(providers)
+        provider is ProviderSetting.LiteRtLocal || provider is ProviderSetting.LlamaCppLocal
+    }
 }
 
 /**

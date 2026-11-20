@@ -12,8 +12,11 @@ import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.DiffMetadata
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.toMetadata
+import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.rikkahub.data.ultracode.UltraCodeConfig
+import me.rerere.rikkahub.data.ultracode.UltraCodeEngine
 import me.rerere.rikkahub.utils.generateUnifiedDiff
 import me.rerere.workspace.BackgroundStatus
 import me.rerere.workspace.WorkspaceCommandResult
@@ -49,6 +52,7 @@ suspend fun createWorkspaceTools(
     workspaceId: String?,
     workspaceRepository: WorkspaceRepository,
     cwd: String? = null,
+    settings: Settings = Settings(),
 ): List<Tool> {
     if (workspaceId.isNullOrBlank()) return emptyList()
     val approvalOverrides = workspaceRepository.getById(workspaceId)?.toolApprovalOverrides().orEmpty()
@@ -56,21 +60,42 @@ suspend fun createWorkspaceTools(
 
     val shellCwd = cwd?.removePrefix("/workspace/")?.removePrefix("/workspace")
 
-    return listOf(
-        createReadFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createWriteFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createEditFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createCreateFolderTool(workspaceId, ::needsApproval, workspaceRepository),
-        createReadFolderTool(workspaceId, ::needsApproval, workspaceRepository),
-        createShellTool(workspaceId, ::needsApproval, workspaceRepository, shellCwd),
-        createRunBackgroundTool(workspaceId, ::needsApproval, workspaceRepository, shellCwd),
-        createBackgroundStatusTool(workspaceId, ::needsApproval, workspaceRepository),
-        createBackgroundKillTool(workspaceId, ::needsApproval, workspaceRepository),
-        createUpdateProjectDocTool(workspaceId, workspaceRepository, needsApproval = ::needsApproval),
-        me.rerere.rikkahub.data.fileintel.tools.createInspectFileTool(workspaceId, workspaceRepository, ::needsApproval),
-        me.rerere.rikkahub.data.verification.tools.createVerifyLedgerTool(needsApproval = ::needsApproval),
-        me.rerere.rikkahub.data.ultracode.tools.createUltraCodeTool(workspaceId, workspaceRepository, needsApproval = ::needsApproval),
-    )
+    return buildList {
+        add(createReadFileTool(workspaceId, ::needsApproval, workspaceRepository))
+        add(createWriteFileTool(workspaceId, ::needsApproval, workspaceRepository))
+        add(createEditFileTool(workspaceId, ::needsApproval, workspaceRepository))
+        add(createCreateFolderTool(workspaceId, ::needsApproval, workspaceRepository))
+        add(createReadFolderTool(workspaceId, ::needsApproval, workspaceRepository))
+        add(createShellTool(workspaceId, ::needsApproval, workspaceRepository, shellCwd))
+        add(createRunBackgroundTool(workspaceId, ::needsApproval, workspaceRepository, shellCwd))
+        add(createBackgroundStatusTool(workspaceId, ::needsApproval, workspaceRepository))
+        add(createBackgroundKillTool(workspaceId, ::needsApproval, workspaceRepository))
+        if (settings.enableProjectCartography) {
+            add(createUpdateProjectDocTool(workspaceId, workspaceRepository, needsApproval = ::needsApproval))
+        }
+        if (settings.enableFileIntelligence) {
+            add(me.rerere.rikkahub.data.fileintel.tools.createInspectFileTool(workspaceId, workspaceRepository, ::needsApproval))
+        }
+        if (settings.enableVerificationLedger) {
+            add(me.rerere.rikkahub.data.verification.tools.createVerifyLedgerTool(needsApproval = ::needsApproval))
+        }
+        if (settings.enableUltraCodeEngine) {
+            add(
+                me.rerere.rikkahub.data.ultracode.tools.createUltraCodeTool(
+                    workspaceId = workspaceId,
+                    workspaceRepository = workspaceRepository,
+                    engine = UltraCodeEngine(
+                        config = UltraCodeConfig(
+                            maxCycles = settings.ultraCodeMaxCycles.coerceIn(1, 20),
+                            maxWorkers = settings.ultraCodeMaxWorkers.coerceIn(1, 16),
+                            maxRetries = settings.ultraCodeMaxRetries.coerceIn(0, 10),
+                        )
+                    ),
+                    needsApproval = ::needsApproval,
+                )
+            )
+        }
+    }
 }
 
 private val IMAGE_EXTENSIONS = setOf(

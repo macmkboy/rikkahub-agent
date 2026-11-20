@@ -105,6 +105,18 @@ data class Settings(
     val maxToolsSoftCap: Int = 128,
     val enableExtractiveCompactionFallback: Boolean = true,
     val enableLocalSlmAuxWorker: Boolean = true,
+    val enableToolOutputTruncation: Boolean = true,
+    val toolOutputMaxChars: Int = 12_000,
+    val enableUpstreamContextDiscovery: Boolean = true,
+    val agent2ContextBrokerMaxTokens: Int = 120_000,
+    val enableProjectCartography: Boolean = true,
+    val enableFileIntelligence: Boolean = true,
+    val enableVerificationLedger: Boolean = true,
+    val enableDynamicSkillsSelector: Boolean = true,
+    val enableUltraCodeEngine: Boolean = false,
+    val ultraCodeMaxCycles: Int = 5,
+    val ultraCodeMaxWorkers: Int = 4,
+    val ultraCodeMaxRetries: Int = 2,
 ) {
     companion object {
         // 构造一个用于初始化的settings, 但它不能用于保存，防止使用初始值存储

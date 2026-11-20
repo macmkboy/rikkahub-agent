@@ -681,6 +681,7 @@ class GenerationLoop(
         streamHeartbeat: MutableStateFlow<me.rerere.rikkahub.data.ai.watchdog.StreamHeartbeatState?>? = null,
         onWatchdogControllerAttached: ((me.rerere.rikkahub.data.ai.watchdog.StreamWatchdogController?) -> Unit)? = null,
     ): Flow<GenerationChunk> = flow {
+        me.rerere.ai.util.UpstreamContextRegistry.enabled = settings.enableUpstreamContextDiscovery
         val provider = model.findProvider(settings.providers) ?: error("Provider not found")
         val providerImpl = usageRecorder.wrap(
             providerManager.getProviderByType(provider),
@@ -1467,7 +1468,13 @@ class GenerationLoop(
                             // the context window.
                             val hasShellAccess = toolsInternal.any { it.name == "workspace_shell" }
                             executedTools += markedTool.copy(
-                                output = maybeTruncateToolOutput(tool.toolCallId, result, hasShellAccess)
+                                output = maybeTruncateToolOutput(
+                                    toolCallId = tool.toolCallId,
+                                    output = result,
+                                    hasShellAccess = hasShellAccess,
+                                    enableTruncation = settings.enableToolOutputTruncation,
+                                    maxChars = settings.toolOutputMaxChars,
+                                )
                             )
                         }.onFailure {
                             // runCatching also captures CancellationException (e.g. the user
@@ -1656,17 +1663,19 @@ class GenerationLoop(
             val recentChatsPrompt = if (assistant.enableRecentChatsReference && !isSubAgent) {
                 buildRecentChatsPrompt(assistant, conversationRepo)
             } else ""
-            val projectDoc = runCatching {
-                val wsId = assistant.workspaceId?.toString()
-                if (!wsId.isNullOrBlank()) {
-                    val repo = workspaceRepository ?: org.koin.java.KoinJavaComponent.getKoin().getOrNull<me.rerere.rikkahub.data.repository.WorkspaceRepository>()
-                    val wsDir = repo?.resolveAbsoluteFile(wsId, "/workspace")
-                    if (wsDir != null) {
-                        val projFile = java.io.File(wsDir, me.rerere.rikkahub.data.cartography.ProjectCartographer.PROJECT_DOC_RELATIVE_PATH)
-                        if (projFile.exists() && projFile.isFile) projFile.readText() else ""
+            val projectDoc = if (settings.enableProjectCartography) {
+                runCatching {
+                    val wsId = assistant.workspaceId?.toString()
+                    if (!wsId.isNullOrBlank()) {
+                        val repo = workspaceRepository ?: org.koin.java.KoinJavaComponent.getKoin().getOrNull<me.rerere.rikkahub.data.repository.WorkspaceRepository>()
+                        val wsDir = repo?.resolveAbsoluteFile(wsId, "/workspace")
+                        if (wsDir != null) {
+                            val projFile = java.io.File(wsDir, me.rerere.rikkahub.data.cartography.ProjectCartographer.PROJECT_DOC_RELATIVE_PATH)
+                            if (projFile.exists() && projFile.isFile) projFile.readText() else ""
+                        } else ""
                     } else ""
-                } else ""
-            }.getOrDefault("")
+                }.getOrDefault("")
+            } else ""
 
             val rulesPrompt = runCatching {
                 val wsId = assistant.workspaceId?.toString()
@@ -1687,17 +1696,19 @@ class GenerationLoop(
 
             val latestUserText = messages.lastOrNull { it.role == MessageRole.USER }?.parts
                 ?.filterIsInstance<UIMessagePart.Text>()?.joinToString(" ") { it.text } ?: ""
-            val skillsSelection = runCatching {
-                val sm = skillManager ?: org.koin.core.context.GlobalContext.getOrNull()?.getOrNull<me.rerere.rikkahub.data.files.SkillManager>()
-                val allSkills = sm?.listSkills() ?: emptyList()
-                val enabledSkillNames = assistant.enabledSkills
-                me.rerere.rikkahub.data.skills.selector.SkillsSelector.select(
-                    catalog = allSkills,
-                    userMessage = latestUserText,
-                    projectDoc = projectDoc,
-                    enabledSkillNames = enabledSkillNames,
-                )
-            }.getOrNull()
+            val skillsSelection = if (settings.enableDynamicSkillsSelector) {
+                runCatching {
+                    val sm = skillManager ?: org.koin.core.context.GlobalContext.getOrNull()?.getOrNull<me.rerere.rikkahub.data.files.SkillManager>()
+                    val allSkills = sm?.listSkills() ?: emptyList()
+                    val enabledSkillNames = assistant.enabledSkills
+                    me.rerere.rikkahub.data.skills.selector.SkillsSelector.select(
+                        catalog = allSkills,
+                        userMessage = latestUserText,
+                        projectDoc = projectDoc,
+                        enabledSkillNames = enabledSkillNames,
+                    )
+                }.getOrNull()
+            } else null
             val skillsPrompt = skillsSelection?.renderMarkdown().orEmpty()
 
             val toolPrompts = tools.map { tool -> tool.systemPrompt(model, messages) }
@@ -1713,6 +1724,7 @@ class GenerationLoop(
                 projectDoc = projectDoc,
                 rulesPrompt = rulesPrompt,
                 skillsPrompt = skillsPrompt,
+                maxPromptTokens = settings.agent2ContextBrokerMaxTokens.coerceAtLeast(1_000),
             )
             val systemParts = buildList {
                 if (stableSystem.isNotBlank()) add(UIMessagePart.Text(stableSystem))
@@ -1725,10 +1737,13 @@ class GenerationLoop(
             // tool-output decay, on top of upstream's isSynthetic marker (keeps this built-up
             // system prompt out of TemplateTransformer) and its stepped truncation (which now
             // preserves prompt caching instead of trimming one message at a time).
+            val preparedHistory = messages.limitContext(assistant.contextMessageLimit).ageOldToolImages()
             addAll(
-                ToolOutputTruncator.decayAgedToolOutputs(
-                    messages.limitContext(assistant.contextMessageLimit).ageOldToolImages()
-                )
+                if (settings.enableToolOutputTruncation) {
+                    ToolOutputTruncator.decayAgedToolOutputs(preparedHistory)
+                } else {
+                    preparedHistory
+                }
             )
         }.transforms(
             transformers = transformers,
@@ -1901,18 +1916,22 @@ class GenerationLoop(
         toolCallId: String,
         output: List<UIMessagePart>,
         hasShellAccess: Boolean,
+        enableTruncation: Boolean = true,
+        maxChars: Int = MAX_TOOL_OUTPUT_CHARS,
     ): List<UIMessagePart> {
+        if (!enableTruncation) return output
+        val effectiveMaxChars = maxChars.coerceAtLeast(1_000)
         val textParts = output.filterIsInstance<UIMessagePart.Text>()
         val nonTextParts = output.filter { it !is UIMessagePart.Text }
         val totalChars = textParts.sumOf { it.text.length }
 
-        if (totalChars <= MAX_TOOL_OUTPUT_CHARS) {
-            return ToolOutputTruncator.truncateToolOutputParts(output)
+        if (totalChars <= effectiveMaxChars) {
+            return ToolOutputTruncator.truncateToolOutputParts(output, maxChars = effectiveMaxChars)
         }
 
         if (!hasShellAccess) {
             Log.i(TAG, "maybeTruncateToolOutput: structured head+tail truncation for $toolCallId ($totalChars chars)")
-            return ToolOutputTruncator.truncateToolOutputParts(output)
+            return ToolOutputTruncator.truncateToolOutputParts(output, maxChars = effectiveMaxChars)
         }
 
         Log.i(TAG, "maybeTruncateToolOutput: truncating tool $toolCallId output ($totalChars chars) and spilling to file")
@@ -1922,7 +1941,7 @@ class GenerationLoop(
             text = fullText,
             headLines = 100,
             tailLines = 150,
-            maxChars = 16_000,
+            maxChars = effectiveMaxChars,
         )
 
         val fileName = "${toolCallId}.txt"

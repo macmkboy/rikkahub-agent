@@ -81,4 +81,30 @@ class MemoryPromptTest {
         assertFalse(buildMemoryConsolidationPrompt(fullReview = false).contains("## Full review"))
         assertTrue(buildMemoryConsolidationPrompt(fullReview = true).contains("## Full review"))
     }
+
+    @Test
+    fun `chat-turn memory prompt omits format rules and stays compact`() {
+        val prompt = buildMemoryPrompt(emptyList())
+
+        assertFalse("Chat-turn prompt must omit <memory_format>", prompt.contains("<memory_format>"))
+        assertTrue("Chat-turn static boilerplate should stay under 1.5 KB (was ${prompt.length})", prompt.length < 1_500)
+        assertTrue("Consolidation prompt must keep <memory_format>", buildMemoryConsolidationPrompt(fullReview = false).contains("<memory_format>"))
+    }
+
+    @Test
+    fun `oversized profile and preferences are truncated inline with memory_read pointer`() {
+        val oversizedProfile = MemoryFile(MemoryFile.PROFILE_PATH, "P".repeat(MAX_INLINE_PINNED_MEMORY_CHARS + 500), updatedAt = 0)
+        val oversizedPrefs = MemoryFile(MemoryFile.PREFERENCES_PATH, "R".repeat(MAX_INLINE_PINNED_MEMORY_CHARS + 500), updatedAt = 0)
+
+        val chatPrompt = buildMemoryPrompt(listOf(oversizedProfile, oversizedPrefs))
+        assertTrue(chatPrompt.block("profile").contains("memory_read(\"${MemoryFile.PROFILE_PATH}\")"))
+        assertTrue(chatPrompt.block("preferences").contains("memory_read(\"${MemoryFile.PREFERENCES_PATH}\")"))
+        assertTrue(chatPrompt.block("profile").length < oversizedProfile.content.length)
+        assertTrue(chatPrompt.block("preferences").length < oversizedPrefs.content.length)
+
+        // Consolidation input keeps full pinned file contents so dreaming doesn't lose facts
+        val consolidationInput = buildMemoryConsolidationInput(listOf(oversizedProfile, oversizedPrefs), emptyList())
+        assertFalse(consolidationInput.block("profile").contains("truncated"))
+        assertEquals(oversizedProfile.content, consolidationInput.block("profile"))
+    }
 }

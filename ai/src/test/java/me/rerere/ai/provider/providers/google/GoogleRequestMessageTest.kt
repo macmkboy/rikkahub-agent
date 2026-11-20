@@ -525,7 +525,7 @@ class GoogleRequestMessageTest {
     }
 
     @Test
-    fun `AUTO reasoning level infers thinkingLevel from suffixed models like gemini-3-8-flash-high`() {
+    fun `AUTO reasoning level omits thinkingLevel even for suffixed models like gemini-3-8-flash-high`() {
         val messages = listOf(UIMessage.user("hello"))
         val params = TextGenerationParams(
             model = Model(
@@ -538,9 +538,9 @@ class GoogleRequestMessageTest {
         val request = invokeBuildCompletionRequestBody(messages, params)
         val thinkingConfig = request["generationConfig"]!!.jsonObject["thinkingConfig"]!!.jsonObject
 
-        assertEquals(
-            "high",
-            thinkingConfig["thinkingLevel"]?.jsonPrimitive?.content
+        assertTrue(
+            "AUTO must omit thinkingLevel even on suffixed models",
+            !thinkingConfig.containsKey("thinkingLevel")
         )
     }
 

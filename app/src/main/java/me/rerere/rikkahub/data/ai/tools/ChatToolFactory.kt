@@ -51,7 +51,7 @@ class ChatToolFactory(
         model: Model,
         workspaceCwd: String? = null,
     ): List<Tool> {
-        val workspaceTools = createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), workspaceCwd)
+        val workspaceTools = createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), workspaceCwd, settings)
         val tools = buildList {
             if (assistant.enableMemory) {
                 addAll(buildMemoryTools(memoryRepository, assistant.memoryId))
@@ -93,20 +93,26 @@ class ChatToolFactory(
                 )
             }
         }
-        // 过长的输出存成文件让模型用 shell 按需读取；没有 shell 时模型读不到文件，只能原样返回
-        return (if (workspaceTools.isEmpty()) tools else tools.map(::withOutputTruncation)).distinctBy { it.name }
+        // 过长的输出存成文件让模型用 shell 按需读取；没有 shell 或用户关闭截断时原样返回
+        val maybeTruncated = if (workspaceTools.isEmpty() || !settings.enableToolOutputTruncation) {
+            tools
+        } else {
+            val maxChars = settings.toolOutputMaxChars.coerceAtLeast(1_000)
+            tools.map { withOutputTruncation(it, maxChars) }
+        }
+        return maybeTruncated.distinctBy { it.name }
     }
 
-    private fun withOutputTruncation(tool: Tool): Tool {
+    private fun withOutputTruncation(tool: Tool, maxChars: Int): Tool {
         if (tool.name in TOOLS_WITHOUT_OUTPUT_TRUNCATION) return tool
         val execute = tool.execute
-        return tool.copy(execute = { truncateOutput(execute(it)) })
+        return tool.copy(execute = { truncateOutput(execute(it), maxChars) })
     }
 
-    private fun truncateOutput(output: List<UIMessagePart>): List<UIMessagePart> {
+    private fun truncateOutput(output: List<UIMessagePart>, maxChars: Int = MAX_TOOL_OUTPUT_CHARS): List<UIMessagePart> {
         val textParts = output.filterIsInstance<UIMessagePart.Text>()
         val totalChars = textParts.sumOf { it.text.length }
-        if (totalChars <= MAX_TOOL_OUTPUT_CHARS) return output
+        if (totalChars <= maxChars) return output
 
         val fileName = "${Uuid.random()}.txt"
         Log.i(TAG, "truncateOutput: saving $totalChars chars to $fileName")
@@ -145,7 +151,11 @@ class ChatToolFactory(
         return mcpTools
     }
 
-    private suspend fun createWorkspaceToolsIfReady(workspaceId: String?, cwd: String?): List<Tool> {
+    private suspend fun createWorkspaceToolsIfReady(
+        workspaceId: String?,
+        cwd: String?,
+        settings: Settings = Settings(),
+    ): List<Tool> {
         if (workspaceId.isNullOrBlank()) return emptyList()
         val workspace = workspaceRepository.getById(workspaceId) ?: return emptyList()
         if (workspace.shellStatus != WorkspaceShellStatus.READY.name) {
@@ -155,6 +165,6 @@ class ChatToolFactory(
             )
             return emptyList()
         }
-        return createWorkspaceTools(workspaceId, workspaceRepository, cwd)
+        return createWorkspaceTools(workspaceId, workspaceRepository, cwd, settings)
     }
 }

@@ -9,7 +9,8 @@ import org.junit.Test
 class UpstreamContextRegistryTest {
     @After
     fun tearDown() {
-        UpstreamContextRegistry.clearForTest()
+        UpstreamContextRegistry.enabled = true
+        UpstreamContextRegistry.clear()
     }
 
     @Test
@@ -41,5 +42,27 @@ class UpstreamContextRegistryTest {
     fun `returns null when neither static nor discovered context length exists`() {
         val model = Model(modelId = "unknown-model", contextLength = null)
         assertNull(UpstreamContextRegistry.resolveContextLength(model))
+    }
+
+    @Test
+    fun `disabling discovery ignores recording and lookups and clear removes cached limits`() {
+        val model = Model(modelId = "agnes-3.0-flash", contextLength = null)
+        UpstreamContextRegistry.record(model.modelId, 256_000)
+        assertEquals(256_000, UpstreamContextRegistry.resolveContextLength(model))
+
+        UpstreamContextRegistry.enabled = false
+        assertNull(UpstreamContextRegistry.getDiscoveredContextLength(model.modelId))
+        assertNull(UpstreamContextRegistry.resolveContextLength(model))
+        assertNull(
+            UpstreamContextRegistry.recordFromError(
+                modelId = "other-model",
+                errorText = "maximum context length is 131072 tokens",
+            )
+        )
+
+        UpstreamContextRegistry.enabled = true
+        assertNull(UpstreamContextRegistry.getDiscoveredContextLength("other-model"))
+        UpstreamContextRegistry.clear()
+        assertNull(UpstreamContextRegistry.getDiscoveredContextLength(model.modelId))
     }
 }

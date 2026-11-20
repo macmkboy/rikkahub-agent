@@ -7,6 +7,7 @@ import me.rerere.ai.core.ReasoningLevel
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.utils.JsonInstant
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -96,6 +97,18 @@ class PreferencesStoreTest {
             "maxToolsSoftCap",
             "enableExtractiveCompactionFallback",
             "enableLocalSlmAuxWorker",
+            "enableToolOutputTruncation",
+            "toolOutputMaxChars",
+            "enableUpstreamContextDiscovery",
+            "agent2ContextBrokerMaxTokens",
+            "enableProjectCartography",
+            "enableFileIntelligence",
+            "enableVerificationLedger",
+            "enableDynamicSkillsSelector",
+            "enableUltraCodeEngine",
+            "ultraCodeMaxCycles",
+            "ultraCodeMaxWorkers",
+            "ultraCodeMaxRetries",
         )
         val withoutHarness = JsonObject(
             JsonInstant.parseToJsonElement(fullJson).jsonObject.filterKeys { it !in harnessKeys }
@@ -109,5 +122,17 @@ class PreferencesStoreTest {
         assertEquals(128, decoded.maxToolsSoftCap)
         assertTrue(decoded.enableExtractiveCompactionFallback)
         assertTrue(decoded.enableLocalSlmAuxWorker)
+        assertTrue(decoded.enableToolOutputTruncation)
+        assertEquals(12_000, decoded.toolOutputMaxChars)
+        assertTrue(decoded.enableUpstreamContextDiscovery)
+        assertEquals(120_000, decoded.agent2ContextBrokerMaxTokens)
+        assertTrue(decoded.enableProjectCartography)
+        assertTrue(decoded.enableFileIntelligence)
+        assertTrue(decoded.enableVerificationLedger)
+        assertTrue(decoded.enableDynamicSkillsSelector)
+        assertFalse(decoded.enableUltraCodeEngine)
+        assertEquals(5, decoded.ultraCodeMaxCycles)
+        assertEquals(4, decoded.ultraCodeMaxWorkers)
+        assertEquals(2, decoded.ultraCodeMaxRetries)
     }
 }

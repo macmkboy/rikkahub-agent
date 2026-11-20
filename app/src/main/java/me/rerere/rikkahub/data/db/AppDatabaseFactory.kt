@@ -14,6 +14,7 @@ import me.rerere.rikkahub.data.db.migrations.Migration_23_24
 import me.rerere.rikkahub.data.db.migrations.Migration_30_31
 import me.rerere.rikkahub.data.db.migrations.Migration_31_32
 import me.rerere.rikkahub.data.db.migrations.Migration_32_33
+import me.rerere.rikkahub.data.db.migrations.repairMemorySchemaIfNeeded
 import java.io.File
 
 /** Shared schema, migrations and extensions for the app and staged backup validation. */
@@ -35,6 +36,11 @@ internal object AppDatabaseFactory {
                         createMessageFtsTables(db)
                     } catch (e: Exception) {
                         android.util.Log.e("DataSourceModule", "onOpen: message_fts table creation failed", e)
+                    }
+                    try {
+                        repairMemorySchemaIfNeeded(db)
+                    } catch (e: Exception) {
+                        android.util.Log.e("DataSourceModule", "onOpen: memory schema repair failed", e)
                     }
                 }
             })

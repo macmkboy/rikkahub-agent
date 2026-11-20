@@ -33,6 +33,14 @@ data class PendingMemoryConversation(
     val automatic: Boolean = true,
 )
 
+/** 一次整理的结果分类 */
+enum class ConsolidationOutcome {
+    UPDATED,
+    NOTHING_NEW,
+    SKIPPED_NO_MODEL,
+    FAILED,
+}
+
 /** 一次整理的结果 */
 data class MemoryConsolidationRun(
     val memoryId: String,
@@ -48,6 +56,11 @@ data class MemoryConsolidationRun(
     /** 这次整理花了多久，由调度器填 */
     val duration: Duration = Duration.ZERO,
     val error: String? = null,
+    val outcome: ConsolidationOutcome = when {
+        error != null -> ConsolidationOutcome.FAILED
+        changedPaths.isNotEmpty() || deletedPaths.isNotEmpty() -> ConsolidationOutcome.UPDATED
+        else -> ConsolidationOutcome.NOTHING_NEW
+    },
 ) {
     val hasChanges: Boolean get() = changedPaths.isNotEmpty() || deletedPaths.isNotEmpty()
 }
@@ -55,13 +68,21 @@ data class MemoryConsolidationRun(
 /** 手动整理分了几批时合成一次结果：后一批的改动覆盖前一批，失败时保留失败信息 */
 internal operator fun MemoryConsolidationRun.plus(next: MemoryConsolidationRun): MemoryConsolidationRun {
     val deleted = (deletedPaths - next.changedPaths.toSet() + next.deletedPaths).distinct()
+    val mergedChanged = (changedPaths + next.changedPaths).distinct() - next.deletedPaths.toSet()
+    val mergedOutcome = when {
+        next.outcome == ConsolidationOutcome.SKIPPED_NO_MODEL -> ConsolidationOutcome.SKIPPED_NO_MODEL
+        next.error != null -> ConsolidationOutcome.FAILED
+        mergedChanged.isNotEmpty() || deleted.isNotEmpty() -> ConsolidationOutcome.UPDATED
+        else -> ConsolidationOutcome.NOTHING_NEW
+    }
     return next.copy(
         fullReview = fullReview || next.fullReview,
-        changedPaths = (changedPaths + next.changedPaths).distinct() - next.deletedPaths.toSet(),
+        changedPaths = mergedChanged,
         deletedPaths = deleted,
         titles = (titles + next.titles) - deleted.toSet(),
         advancedConversations = advancedConversations + next.advancedConversations,
         duration = duration + next.duration,
+        outcome = mergedOutcome,
     )
 }
 
@@ -90,12 +111,13 @@ interface MemoryConsolidationWorker {
 
     /**
      * 整理 [conversationIds] 里新增的轮次，[fullReview] 时再把整个记忆库清理一遍。
-     * 没有可做的事时返回 null，失败时抛出。
+     * 没有可做的事时返回 null（或手动触发时返回 NOTHING_NEW），失败时抛出。
      */
     suspend fun consolidate(
         memoryId: String,
         conversationIds: Set<Uuid>,
         fullReview: Boolean,
+        manual: Boolean = fullReview,
     ): MemoryConsolidationRun?
 }
 
@@ -163,8 +185,10 @@ class MemoryConsolidationScheduler(
     }
 
     /** 应用被切到后台：之后空闲计时不一定还能走完，有待整理的就现在开始 */
-    fun onAppHidden() {
-        synchronized(lock) { pending.filterValues { it.hasAutomatic() }.keys.toList() }.forEach(::launchRun)
+    fun onAppHidden(shouldRunMemory: (memoryId: String) -> Boolean = { true }) {
+        synchronized(lock) {
+            pending.filterValues { it.hasAutomatic() }.keys.filter(shouldRunMemory).toList()
+        }.forEach(::launchRun)
     }
 
     /** 用户离开了对话，不会马上再有新消息，不用等到空闲 */
@@ -233,7 +257,7 @@ class MemoryConsolidationScheduler(
         try {
             var fullReview = manual
             while (true) {
-                val pass = runOnce(memoryId, pendingOf(memoryId, manual).keys, fullReview)
+                val pass = runOnce(memoryId, pendingOf(memoryId, manual).keys, fullReview, manual)
                 if (pass != null) run = run?.let { it + pass } ?: pass
                 if (pass?.error != null) break
                 // 有对话可能因为超出长度预算被留到下一次，从数据库里再找一遍
@@ -258,10 +282,11 @@ class MemoryConsolidationScheduler(
         memoryId: String,
         ids: Set<Uuid>,
         fullReview: Boolean,
+        manual: Boolean,
     ): MemoryConsolidationRun? {
         val started = TimeSource.Monotonic.markNow()
         val result = try {
-            worker.consolidate(memoryId, ids, fullReview)
+            worker.consolidate(memoryId, ids, fullReview, manual)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -270,6 +295,7 @@ class MemoryConsolidationScheduler(
                 finishedAt = System.currentTimeMillis(),
                 fullReview = fullReview,
                 error = e.message ?: e.toString(),
+                outcome = ConsolidationOutcome.FAILED,
             )
         }?.copy(duration = started.elapsedNow())
         synchronized(lock) {

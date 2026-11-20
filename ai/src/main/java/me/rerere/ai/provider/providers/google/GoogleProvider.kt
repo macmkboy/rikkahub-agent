@@ -464,14 +464,8 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
 
                     when (params.reasoningLevel) {
                         ReasoningLevel.AUTO -> {
-                            if (useThinkingLevel) {
-                                when {
-                                    params.model.modelId.contains("-high", ignoreCase = true) -> put("thinkingLevel", "high")
-                                    params.model.modelId.contains("-low", ignoreCase = true) -> put("thinkingLevel", "low")
-                                    params.model.modelId.contains("-medium", ignoreCase = true) -> put("thinkingLevel", "medium")
-                                    params.model.modelId.contains("-minimal", ignoreCase = true) -> put("thinkingLevel", "minimal")
-                                }
-                            }
+                            // Omit thinkingLevel on AUTO so the server uses its own default
+                            // instead of forcing "high" on suffixed model IDs (e.g. -high).
                         }
 
                         ReasoningLevel.OFF -> {

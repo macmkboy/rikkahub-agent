@@ -9,6 +9,7 @@ import me.rerere.rikkahub.data.verification.SessionVerificationReport
 data class UltraCodeConfig(
     val maxCycles: Int = 5,
     val maxWorkers: Int = 4,
+    val maxRetries: Int = 2,
     val skipFailedUpstream: Boolean = true,
     val enforceVerification: Boolean = true,
 )

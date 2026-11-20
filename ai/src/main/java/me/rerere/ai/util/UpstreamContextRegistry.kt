@@ -21,6 +21,9 @@ object UpstreamContextRegistry {
 
     private val discoveredLimits = ConcurrentHashMap<String, Int>()
 
+    @Volatile
+    var enabled: Boolean = true
+
     private val contextHeaderNames = listOf(
         "x-context-length",
         "x-model-context-length",
@@ -37,6 +40,7 @@ object UpstreamContextRegistry {
     )
 
     fun record(modelId: String, contextLength: Int, providerId: String? = null) {
+        if (!enabled) return
         if (modelId.isBlank()) return
         if (contextLength !in MIN_VALID_CONTEXT_TOKENS..MAX_VALID_CONTEXT_TOKENS) return
         if (discoveredLimits.size >= MAX_ENTRIES) {
@@ -50,6 +54,7 @@ object UpstreamContextRegistry {
     }
 
     fun recordFromHeaders(modelId: String, headers: Headers, providerId: String? = null) {
+        if (!enabled) return
         if (modelId.isBlank()) return
         for (headerName in contextHeaderNames) {
             val rawValue = headers[headerName]?.trim() ?: continue
@@ -62,6 +67,7 @@ object UpstreamContextRegistry {
     }
 
     fun recordFromError(modelId: String, errorText: String?, providerId: String? = null): Int? {
+        if (!enabled) return null
         if (modelId.isBlank() || errorText.isNullOrBlank()) return null
         for (pattern in errorContextPatterns) {
             val match = pattern.find(errorText) ?: continue
@@ -75,6 +81,7 @@ object UpstreamContextRegistry {
     }
 
     fun getDiscoveredContextLength(modelId: String, providerId: String? = null): Int? {
+        if (!enabled) return null
         if (modelId.isBlank()) return null
         val normalizedModel = modelId.trim().lowercase()
         if (!providerId.isNullOrBlank()) {
@@ -89,7 +96,7 @@ object UpstreamContextRegistry {
      *   configured metadata overestimated the true upstream limit, or fills in missing metadata.
      */
     fun resolveContextLength(model: Model, providerId: String? = null): Int? {
-        val discovered = getDiscoveredContextLength(model.modelId, providerId)
+        val discovered = if (enabled) getDiscoveredContextLength(model.modelId, providerId) else null
         val configured = model.contextLength?.takeIf { it > 0 }
         return when {
             discovered != null && configured != null -> minOf(discovered, configured)
@@ -98,11 +105,17 @@ object UpstreamContextRegistry {
         }
     }
 
-    fun clearForTesting() {
+    fun size(): Int = discoveredLimits.size
+
+    fun clear() {
         discoveredLimits.clear()
     }
 
+    fun clearForTesting() {
+        clear()
+    }
+
     fun clearForTest() {
-        discoveredLimits.clear()
+        clear()
     }
 }

@@ -27,6 +27,7 @@ val Migration_32_33 = object : Migration(32, 33) {
                     "`cached_tokens` INTEGER NOT NULL)"
             )
             db.execSQL("CREATE INDEX IF NOT EXISTS `index_usage_record_created_at` ON `usage_record` (`created_at`)")
+            repairMemorySchemaIfNeeded(db)
 
             db.execSQL(
                 """

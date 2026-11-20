@@ -41,7 +41,7 @@ import me.rerere.common.android.Logging
 import me.rerere.common.android.appTempFolder
 import me.rerere.rikkahub.browser.HeadlessBrowserSessionPool
 import me.rerere.rikkahub.data.ai.MemoryConsolidationScheduler
-import me.rerere.rikkahub.data.ai.consolidationModel
+import me.rerere.rikkahub.data.ai.usesLocalOnDeviceConsolidationModel
 import me.rerere.rikkahub.data.ai.tools.HeadlessConversations
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findModelById
@@ -484,6 +484,7 @@ class RikkaHubApp : Application(), SingletonImageLoader.Factory {
             runCatching {
                 delay(500)
                 val settings = get<SettingsStore>().settingsFlowRaw.first()
+                me.rerere.ai.util.UpstreamContextRegistry.enabled = settings.enableUpstreamContextDiscovery
                 if (settings.webServerEnabled) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                         ContextCompat.checkSelfPermission(
@@ -539,23 +540,12 @@ class RikkaHubApp : Application(), SingletonImageLoader.Factory {
                     }
                     Lifecycle.Event.ON_STOP -> {
                         runCatching { get<me.rerere.locallm.litert.LiteRtRuntime>().isAppForeground = false }
-                        // Never trigger automatic background memory consolidation when the
-                        // configured consolidation/fast/chat model is an on-device local LLM:
-                        // loading a 2-4 GB LiteRT / GGUF model the instant the user presses
-                        // Home starves Android Launcher and SystemUI of RAM and CPU.
+                        // Never trigger automatic background memory consolidation for a memory store
+                        // whose consolidation model is an on-device local LLM (LiteRT / GGUF), while
+                        // still allowing cloud-backed assistants to consolidate normally on background.
                         val settings = runCatching { get<SettingsStore>().settingsFlow.value }.getOrNull()
-                        val isLocalOnDevice = settings != null && (
-                            listOfNotNull(
-                                settings.consolidationModel()?.first?.findProvider(settings.providers),
-                                settings.findModelById(settings.fastModelId)?.findProvider(settings.providers),
-                            ).any { it is ProviderSetting.LiteRtLocal || it is ProviderSetting.LlamaCppLocal } ||
-                            settings.assistants.filter { it.enableMemory }.any { assistant ->
-                                val provider = settings.consolidationModel(assistant = assistant)?.first?.findProvider(settings.providers)
-                                provider is ProviderSetting.LiteRtLocal || provider is ProviderSetting.LlamaCppLocal
-                            }
-                        )
-                        if (!isLocalOnDevice) {
-                            get<MemoryConsolidationScheduler>().onAppHidden()
+                        get<MemoryConsolidationScheduler>().onAppHidden { memoryId ->
+                            settings == null || !settings.usesLocalOnDeviceConsolidationModel(memoryId)
                         }
                     }
                     else -> {}

@@ -227,7 +227,11 @@ internal fun backgroundTextGenerationParams(
  */
 internal fun compactionContextLength(settings: Settings, model: Model): Int? =
     settings.getCompactionContextLength(model)
-        ?: UpstreamContextRegistry.resolveContextLength(model)
+        ?: if (settings.enableUpstreamContextDiscovery) {
+            UpstreamContextRegistry.resolveContextLength(model)
+        } else {
+            model.contextLength?.takeIf { it > 0 }
+        }
 
 internal fun isOnDeviceProvider(provider: ProviderSetting): Boolean =
     provider is ProviderSetting.AICore ||
@@ -1731,7 +1735,7 @@ class ChatService(
             modelCanSeeImages = Modality.IMAGE in model.inputModalities,
         )
         addAll(localTools.getTools(assistant.localTools, invocationCtx))
-        addAll(createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), conversation.workspaceCwd))
+        addAll(createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), conversation.workspaceCwd, settings))
         if (assistant.enabledSkills.isNotEmpty()) {
             addAll(
                 createSkillTools(
@@ -2131,7 +2135,7 @@ class ChatService(
                         modelCanSeeImages = Modality.IMAGE in model.inputModalities,
                     )
                     addAll(localTools.getTools(assistant.localTools, invocationCtx))
-                    addAll(createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), conversation.workspaceCwd))
+                    addAll(createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), conversation.workspaceCwd, settings))
                     if (assistant.enabledSkills.isNotEmpty()) {
                         addAll(
                             createSkillTools(
@@ -2313,11 +2317,13 @@ class ChatService(
             generationFailure.isContextLimitError() &&
             canRetryAfterContextLimit
         ) {
-            UpstreamContextRegistry.recordFromError(
-                modelId = model.modelId,
-                errorText = generationFailure.message,
-                providerId = model.findProvider(settings.providers)?.id?.toString(),
-            )
+            if (settings.enableUpstreamContextDiscovery) {
+                UpstreamContextRegistry.recordFromError(
+                    modelId = model.modelId,
+                    errorText = generationFailure.message,
+                    providerId = model.findProvider(settings.providers)?.id?.toString(),
+                )
+            }
             // Some providers omit context_length metadata or reject requests because their
             // system/tool schema overhead is larger than the local estimate. Force one
             // compaction pass and retry the same user turn once before surfacing the provider
@@ -2364,7 +2370,7 @@ class ChatService(
 
         generationResult.onFailure {
             if (it is CancellationException) throw it
-            if (it.isContextLimitError()) {
+            if (it.isContextLimitError() && settings.enableUpstreamContextDiscovery) {
                 UpstreamContextRegistry.recordFromError(
                     modelId = model.modelId,
                     errorText = it.message,
@@ -2450,7 +2456,11 @@ class ChatService(
         }
     }
 
-    private suspend fun createWorkspaceToolsIfReady(workspaceId: String?, cwd: String? = null): List<Tool> {
+    private suspend fun createWorkspaceToolsIfReady(
+        workspaceId: String?,
+        cwd: String? = null,
+        settings: Settings = settingsStore.settingsFlow.value,
+    ): List<Tool> {
         if (workspaceId.isNullOrBlank()) return emptyList()
         val workspace = workspaceRepository.getById(workspaceId) ?: return emptyList()
         if (workspace.shellStatus != WorkspaceShellStatus.READY.name) {
@@ -2460,7 +2470,7 @@ class ChatService(
             )
             return emptyList()
         }
-        return createWorkspaceTools(workspaceId, workspaceRepository, cwd)
+        return createWorkspaceTools(workspaceId, workspaceRepository, cwd, settings)
     }
 
     // ---- 检查无效消息 ----
@@ -2974,14 +2984,21 @@ class ChatService(
 
     private fun automaticCompactionTriggerTokens(settings: Settings, model: Model): Int? =
         when (settings.autoCompactionThresholdMode) {
-            AutoCompactionThresholdMode.PERCENT -> UpstreamContextRegistry.resolveContextLength(model)
-                ?.takeIf { it > 0 }
-                ?.let { length ->
-                    (length.toLong() * settings.autoCompactionThresholdPercent
-                        .coerceIn(5, 95) / 100L)
-                        .coerceAtLeast(1L)
-                        .toInt()
+            AutoCompactionThresholdMode.PERCENT -> {
+                val resolvedLength = if (settings.enableUpstreamContextDiscovery) {
+                    UpstreamContextRegistry.resolveContextLength(model)
+                } else {
+                    model.contextLength?.takeIf { it > 0 }
                 }
+                resolvedLength
+                    ?.takeIf { it > 0 }
+                    ?.let { length ->
+                        (length.toLong() * settings.autoCompactionThresholdPercent
+                            .coerceIn(5, 95) / 100L)
+                            .coerceAtLeast(1L)
+                            .toInt()
+                    }
+            }
             AutoCompactionThresholdMode.TOKENS ->
                 (settings.autoCompactionThresholdTokensK
                     .coerceAtLeast(1)
@@ -3305,7 +3322,12 @@ class ChatService(
             }
 
             // Deterministic extractive fallback so history compression never crashes the turn
-            // when all upstream LLM calls fail or time out.
+            // when all upstream LLM calls fail or time out (gated by Settings).
+            if (!settings.enableExtractiveCompactionFallback) {
+                throw IllegalStateException(
+                    "All LLM compaction candidates failed and deterministic extractive fallback is disabled"
+                )
+            }
             val fallbackSummary = ContextCompactionPlanner.deterministicFallbackSummary(
                 sources = sources,
                 targetTokens = requestedTargetTokens,

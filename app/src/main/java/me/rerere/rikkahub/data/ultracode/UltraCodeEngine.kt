@@ -77,18 +77,21 @@ class UltraCodeEngine(
                     title = "Analyze Requirements and Environment",
                     kind = "computation",
                     needs = emptySet(),
+                    maxRetries = config.maxRetries,
                 ),
                 TaskNode(
                     id = "step_2",
                     title = "Execute Primary Implementation",
                     kind = "tool",
                     needs = setOf("step_1"),
+                    maxRetries = config.maxRetries,
                 ),
                 TaskNode(
                     id = "step_3",
                     title = "Verify Outcome and Artifacts",
                     kind = "verification",
                     needs = setOf("step_2"),
+                    maxRetries = config.maxRetries,
                 ),
             )
         }

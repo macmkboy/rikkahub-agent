@@ -970,13 +970,17 @@ private fun ChatHarnessInspectorSheet(
     val provider = remember(chatModel, setting.providers) {
         chatModel?.findProvider(setting.providers, checkOverwrite = false)
     }
-    val effectiveContextLimit = remember(chatModel, provider) {
+    val effectiveContextLimit = remember(chatModel, provider, setting.enableUpstreamContextDiscovery) {
         if (chatModel != null) {
-            UpstreamContextRegistry.resolveContextLength(chatModel, provider?.id?.toString())
+            if (setting.enableUpstreamContextDiscovery) {
+                UpstreamContextRegistry.resolveContextLength(chatModel, provider?.id?.toString())
+            } else {
+                chatModel.contextLength?.takeIf { it > 0 }
+            }
         } else null
     }
-    val discoveredContextLimit = remember(chatModel, provider) {
-        if (chatModel != null) {
+    val discoveredContextLimit = remember(chatModel, provider, setting.enableUpstreamContextDiscovery) {
+        if (chatModel != null && setting.enableUpstreamContextDiscovery) {
             UpstreamContextRegistry.getDiscoveredContextLength(chatModel.modelId, provider?.id?.toString())
         } else null
     }
@@ -1051,8 +1055,13 @@ private fun ChatHarnessInspectorSheet(
                             text = "Active Context Estimate: ~${historyTokensEstimate} tokens (${conversation.messageNodes.size} total turns)",
                             style = MaterialTheme.typography.bodySmall,
                         )
+                        val effectiveCap = assistant.maxTools ?: setting.maxToolsSoftCap
                         Text(
-                            text = "Tool Soft Cap: ${assistant.maxTools ?: setting.maxToolsSoftCap} tools/turn",
+                            text = if (effectiveCap <= 0) {
+                                "Tool Soft Cap: Unlimited"
+                            } else {
+                                "Tool Soft Cap: $effectiveCap tools/turn"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                         )
                         if (!conversation.workspaceCwd.isNullOrBlank()) {
