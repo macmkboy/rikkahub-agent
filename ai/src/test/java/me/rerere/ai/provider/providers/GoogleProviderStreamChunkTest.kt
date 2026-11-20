@@ -94,14 +94,17 @@ class GoogleProviderStreamChunkTest {
     }
 
     @Test
-    fun `a signature-only thought part with no text is skipped without throwing`() {
+    fun `a signature-only thought part with no text is preserved with metadata without throwing`() {
         val chunk = parse(
             """{"candidates":[{"content":{"role":"model","parts":[
                 {"thought":true,"thoughtSignature":"sig-1"}
             ]}}]}"""
         )
         val delta = requireNotNull(requireNotNull(chunk).choices[0].delta)
-        assertEquals(0, delta.parts.size)
+        assertEquals(1, delta.parts.size)
+        val part = delta.parts[0] as UIMessagePart.Text
+        assertEquals("", part.text)
+        requireNotNull(part.metadata)
     }
 
     @Test
